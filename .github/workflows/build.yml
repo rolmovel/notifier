@@ -18,15 +18,7 @@ jobs:
             runner: windows-latest
             artifact_name: WhatsAppNotifier-windows
             archive: zip
-          - os: macOS-Intel
-            runner: macos-13
-            artifact_name: WhatsAppNotifier-macos-intel
-            archive: tar.gz
-          - os: macOS-ARM
-            runner: macos-latest
-            artifact_name: WhatsAppNotifier-macos-arm
-            archive: tar.gz
-
+            
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
