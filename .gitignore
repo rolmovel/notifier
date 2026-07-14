@@ -1,0 +1,64 @@
+# Universal
+.DS_Store
+Thumbs.db
+*.tmp
+*.swp
+.vscode/
+.idea/
+*.log
+*.log*
+
+# Environment and Secrets
+.env
+.env.local
+.env.*.local
+docker/.env
+!docker/.env.example
+
+# Service Specific Data / Volumes
+docker/postgres/data/
+docker/redis/data/
+postgres-data/
+redis-data/
+n8n-data/
+evolution-data/
+
+# Runtime Dependencies
+node_modules/
+dist/
+build/
+coverage/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node.js bridge
+bridge/node_modules/
+bridge/auth/
+bridge/package-lock.json
+
+# PyInstaller / Build artifacts
+*.spec.bak
+dist-desktop/
+build-desktop/
+
+# App local data
+data/settings.json
+data/history/
+data/*.json
+
+
+# Python (for possible code evaluation or nodes)
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/

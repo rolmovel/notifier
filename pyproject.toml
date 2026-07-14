@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "whatsapp-desktop-utility"
+version = "1.0.0"
+description = "Desktop utility for sending WhatsApp appointment reminders from Excel files"
+requires-python = ">=3.11"
+dependencies = [
+    "PySide6>=6.6,<7.0",
+    "openpyxl>=3.1,<4.0",
+    "httpx>=0.27,<1.0",
+    "pydantic>=2.6,<3.0",
+    "phonenumbers>=8.13,<9.0",
+    "platformdirs>=4.2,<5.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0,<9.0",
+    "pytest-qt>=4.3,<5.0",
+    "pytest-httpx>=0.30,<1.0",
+    "pytest-asyncio>=0.23,<1.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+qt_api = "pyside6"
+asyncio_mode = "auto"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]

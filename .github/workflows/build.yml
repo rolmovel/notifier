@@ -1,0 +1,167 @@
+name: Build WhatsApp Notifier
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build ${{ matrix.os }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: Windows
+            runner: windows-latest
+            artifact_name: WhatsAppNotifier-windows
+            archive: zip
+          - os: macOS-Intel
+            runner: macos-13
+            artifact_name: WhatsAppNotifier-macos-intel
+            archive: tar.gz
+          - os: macOS-ARM
+            runner: macos-latest
+            artifact_name: WhatsAppNotifier-macos-arm
+            archive: tar.gz
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Install bridge dependencies
+        run: |
+          cd bridge
+          npm install --production
+
+      - name: Build with PyInstaller (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          pyinstaller whatsapp-notifier.spec --noconfirm --clean
+
+      - name: Build with PyInstaller (macOS/Linux)
+        if: runner.os != 'Windows'
+        run: |
+          pyinstaller whatsapp-notifier.spec --noconfirm --clean
+
+      - name: Assemble distribution (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $distDir = "dist\WhatsAppNotifier-release"
+          New-Item -ItemType Directory -Force -Path $distDir
+          Copy-Item -Recurse -Force "dist\WhatsAppNotifier\*" $distDir
+
+          # Ensure bridge node_modules are included
+          if (Test-Path "bridge\node_modules") {
+            New-Item -ItemType Directory -Force -Path "$distDir\bridge"
+            Copy-Item -Recurse -Force "bridge\node_modules" "$distDir\bridge\"
+            Copy-Item -Force "bridge\package.json" "$distDir\bridge\"
+            Copy-Item -Force "bridge\whatsapp-bridge.js" "$distDir\bridge\"
+          }
+
+          # Create README
+          @"
+          WhatsApp Notifier - Distribution Package
+          ========================================
+
+          Requirements:
+          - Node.js 18+ must be installed on the target machine (for the WhatsApp bridge)
+
+          To run:
+          1. Extract this folder
+          2. Run WhatsAppNotifier.exe
+          3. The app will start the WhatsApp bridge automatically.
+          "@ | Out-File -Encoding utf8 "$distDir\README.txt"
+
+          Compress-Archive -Path "$distDir\*" -DestinationPath "$env:GITHUB_WORKSPACE\${{ matrix.artifact_name }}.zip"
+
+      - name: Assemble distribution (macOS/Linux)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          DIST_DIR="dist/WhatsAppNotifier-release"
+          mkdir -p "$DIST_DIR"
+          cp -r dist/WhatsAppNotifier/* "$DIST_DIR/"
+
+          # Ensure bridge node_modules are included
+          if [ -d "bridge/node_modules" ]; then
+            mkdir -p "$DIST_DIR/bridge"
+            cp -r bridge/node_modules "$DIST_DIR/bridge/"
+            cp bridge/package.json "$DIST_DIR/bridge/"
+            cp bridge/whatsapp-bridge.js "$DIST_DIR/bridge/"
+          fi
+
+          # Create README
+          cat > "$DIST_DIR/README.txt" << 'README'
+          WhatsApp Notifier - Distribution Package
+          ========================================
+
+          Requirements:
+          - Node.js 18+ must be installed on the target machine (for the WhatsApp bridge)
+
+          To run:
+          1. Extract this folder
+          2. Run WhatsAppNotifier (or WhatsAppNotifier.exe on Windows)
+
+          The app will start the WhatsApp bridge automatically.
+          README
+
+          # Archive
+          tar -czf "${{ matrix.artifact_name }}.tar.gz" -C "$DIST_DIR" .
+
+      - name: Upload artifact (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.artifact_name }}.zip
+          retention-days: 30
+
+      - name: Upload artifact (macOS/Linux)
+        if: runner.os != 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.artifact_name }}.tar.gz
+          retention-days: 30
+
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            artifacts/**/*.zip
+            artifacts/**/*.tar.gz

@@ -1,0 +1,23 @@
+{
+  "enabled": false,
+  "language": "es",
+  "allowed_topics": [
+    "appointment_time",
+    "appointment_date",
+    "appointment_type",
+    "clinic_location",
+    "appointment_confirmation"
+  ],
+  "escalation_rules": {
+    "medical_terms": true,
+    "reschedule_request": true,
+    "low_confidence_threshold": 0.7
+  },
+  "business_hours_start": "09:00",
+  "business_hours_end": "18:00",
+  "business_hours_timezone": "Europe/Madrid",
+  "out_of_hours_message": "Gracias por su mensaje. Nuestro horario de atención es de 09:00 a 18:00. Le responderemos en el próximo horario de consulta.",
+  "max_context_messages": 10,
+  "enable_cross_appointment_memory": true,
+  "profile_memory_retention_days": 90
+}

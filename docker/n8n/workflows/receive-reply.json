@@ -1,0 +1,739 @@
+[
+{
+  "name": "Receive Patient Reply & Bot Response",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "receive-reply",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "e0b0e5ee-11bf-4b0d-9ee2-a16fbcf5ddf1",
+      "webhookId": "e0b0e5ee-11bf-4b0d-9ee2-a16fbcf5ddf1",
+      "name": "Evolution Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [
+        100,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "OK",
+        "options": {}
+      },
+      "id": "b3e3aa99-e6ba-4475-b892-a1bfbe9dedff",
+      "name": "Acknowledge Immediately",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        260,
+        150
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const fs = require('fs');\nconst path = '/opt/notifier/config/bot-config.json';\nlet config = {};\ntry {\n  config = JSON.parse(fs.readFileSync(path, 'utf8'));\n} catch (e) {\n  config = {\n    enabled: false,\n    business_hours_start: \"09:00\",\n    business_hours_end: \"18:00\",\n    business_hours_timezone: \"Europe/Madrid\",\n    out_of_hours_message: \"Gracias por su mensaje. Horario: 09:00 a 18:00.\"\n  };\n}\nreturn [{ json: { config, ...$input.all()[0].json } }];"
+      },
+      "id": "c1ff8899-775b-4322-b91c-772fe1beaa01",
+      "name": "Load Bot Config",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        260,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.all()[0].json;\nconst config = item.config;\nif (!config.enabled) {\n  return [{ json: { passes: false, reason: \"bot_disabled\" } }];\n}\n\n// Business hours check\nconst tz = config.business_hours_timezone || 'Europe/Madrid';\nconst now = new Date();\nconst localTimeStr = now.toLocaleTimeString('en-US', { timeZone: tz, hour12: false });\nconst [hour, min] = localTimeStr.split(':').map(Number);\n\nconst [startHour, startMin] = config.business_hours_start.split(':').map(Number);\nconst [endHour, endMin] = config.business_hours_end.split(':').map(Number);\n\nconst nowMinutes = hour * 60 + min;\nconst startMinutes = startHour * 60 + startMin;\nconst endMinutes = endHour * 60 + endMin;\n\nconst inHours = nowMinutes >= startMinutes && nowMinutes <= endMinutes;\n\nreturn [{\n  json: {\n    ...item,\n    passes: inHours,\n    reason: inHours ? \"\" : \"out_of_hours\"\n  }\n}];"
+      },
+      "id": "e9ffbe24-7bd3-4be2-ba0a-227fe2bead02",
+      "name": "Business Hours Guard",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        430,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{$json.passes}}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "d09fe34e-4f11-447a-9bd1-0a6fced5bda2",
+      "name": "Check Hours Route",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        600,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT * FROM appointments WHERE patient_phone = $1 AND notification_status = 'sent' ORDER BY appointment_date DESC, appointment_time DESC LIMIT 1;",
+        "queryParams": "='+' + {{$node[\"Evolution Webhook\"].json.data.key.remoteJid.split('@')[0]}}"
+      },
+      "id": "890ffd2a-e11a-4632-a892-e22fabcedf1d",
+      "name": "Fetch Last Appointment",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        780,
+        200
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-credentials-id"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const webhookData = $node[\"Evolution Webhook\"].json;\nconst appItem = $node[\"Fetch Last Appointment\"].json;\nconst phone = '+' + webhookData.data.key.remoteJid.split('@')[0];\nconst patientName = appItem.patient_name || webhookData.pushName || 'Paciente';\n\n// We need to retrieve or create the PatientProfile and ConversationSession via PostgreSQL in the next steps.\nreturn [{\n  json: {\n    phone,\n    patientName,\n    appointmentId: appItem.id || null,\n    messageContent: webhookData.data.message.conversation || '',\n    appointmentDate: appItem.appointment_date || null,\n    appointmentTime: appItem.appointment_time || null,\n    appointmentType: appItem.appointment_type || null\n  }\n}];"
+      },
+      "id": "b328aedd-7df2-47da-901d-ba837ffeadec",
+      "name": "Prepare Profile Query Info",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        950,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO patient_profiles (phone_number, patient_name, total_appointments, last_seen_at) VALUES ($1, $2, CASE WHEN $3::uuid IS NOT NULL THEN 1 ELSE 0 END, NOW()) ON CONFLICT (phone_number) DO UPDATE SET patient_name = COALESCE(EXCLUDED.patient_name, patient_profiles.patient_name), total_appointments = patient_profiles.total_appointments + CASE WHEN $3::uuid IS NOT NULL THEN 1 ELSE 0 END, last_seen_at = NOW() RETURNING *;",
+        "queryParams": "={{$json.phone}}, {{$json.patientName}}, {{$json.appointmentId}}"
+      },
+      "id": "e2ba99bb-e0e0-47da-b892-0b7beef56df1",
+      "name": "Upsert Patient Profile",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        200
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-credentials-id"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO conversation_sessions (appointment_id, patient_phone, patient_profile_id, status) VALUES ($1, $2, $3, 'active') ON CONFLICT (appointment_id) DO UPDATE SET last_activity_at = NOW(), message_count = conversation_sessions.message_count + 1 RETURNING *;",
+        "queryParams": "={{$node[\"Prepare Profile Query Info\"].json.appointmentId}}, {{$node[\"Prepare Profile Query Info\"].json.phone}}, {{$json.id}}"
+      },
+      "id": "b2ba99ee-03f1-47cc-bf2e-0a567efebde2",
+      "name": "Upsert Session Info",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        1290,
+        200
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-credentials-id"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "model": "gpt-3.5-turbo",
+        "options": {
+          "temperature": 0
+        }
+      },
+      "id": "ac1bfaef-33bf-4ca2-a9b2-c782fabedf3e",
+      "name": "Layer 1 Topic Classifier",
+      "type": "n8n-nodes-base.openAi",
+      "typeVersion": 1,
+      "position": [
+        1460,
+        200
+      ],
+      "credentials": {
+        "openAi": {
+          "id": "openai-credentials-id"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "prompt": "=Clasifica el mensaje entrante del paciente en base a estas categorías:\n- appointment_time (consulta sobre la hora de la cita)\n- appointment_date (consulta sobre la fecha)\n- appointment_type (consulta sobre de qué trata la cita)\n- clinic_location (dónde está la clínica)\n- appointment_confirmation (confirmación de asistencia)\n- medical_advice (preguntas médicas, síntomas, medicamentos, tratamientos)\n- reschedule_request (solicitud de modificación o cancelación)\n- other (cualquier otro tema fuera de lo anterior)\n\nMensaje del paciente: \"{{$node[\"Prepare Profile Query Info\"].json.messageContent}}\"\n\nResponde estrictamente en formato JSON plano:\n{ \"topic\": \"nombre_topico\", \"confidence\": 0.0-1.0 }"
+      },
+      "id": "fbc3aedd-e91c-4b5b-add1-a08cefb7ebee",
+      "name": "Classification Instructions",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1630,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const classifierResult = $node[\"Layer 1 Topic Classifier\"].json;\nconst allowedTopics = [\"appointment_time\", \"appointment_date\", \"appointment_type\", \"clinic_location\", \"appointment_confirmation\"];\nlet parsedResult = {};\ntry {\n  parsedResult = JSON.parse(classifierResult.text || classifierResult.message.content);\n} catch (e) {\n  parsedResult = { topic: \"other\", confidence: 0.5 };\n}\n\nconst isAllowed = allowedTopics.includes(parsedResult.topic) && parsedResult.confidence >= 0.7;\nreturn [{\n  json: {\n    topic: parsedResult.topic,\n    confidence: parsedResult.confidence,\n    allowed: isAllowed,\n    reason: isAllowed ? \"\" : `blocked_or_low_confidence:${parsedResult.topic}`\n  }\n}];"
+      },
+      "id": "e88e3dd4-e0e0-4632-a892-a16fcedffdef",
+      "name": "Parse Classification",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1800,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{$json.allowed}}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "d09fe91e-f00e-44fa-9ed1-a76fcee5bea2",
+      "name": "Route classification",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        1970,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "model": "gpt-3.5-turbo",
+        "options": {
+          "temperature": 0.2
+        }
+      },
+      "id": "ac1bfaef-33bf-4ca2-a9b2-c782fabedf01",
+      "name": "Layer 2 Prompt Agent",
+      "type": "n8n-nodes-base.openAi",
+      "typeVersion": 1,
+      "position": [
+        2150,
+        100
+      ],
+      "credentials": {
+        "openAi": {
+          "id": "openai-credentials-id"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "prompt": "=Eres un bot de gestión de citas médicas de la clínica. Sigue estrictamente estas reglas:\n1. Solo responde al tema: {{$node[\"Parse Classification\"].json.topic}}.\n2. Con respecto a la cita de {{$node[\"Prepare Profile Query Info\"].json.patientName}}:\n   - Fecha: {{$node[\"Prepare Profile Query Info\"].json.appointmentDate}}\n   - Hora: {{$node[\"Prepare Profile Query Info\"].json.appointmentTime}}\n   - Especialidad: {{$node[\"Prepare Profile Query Info\"].json.appointmentType}}\n3. No proporciones diagnósticos, medicamentos ni consejos sobre salud o tratamientos.\n4. No reveles ningún dato ajeno.\n5. El historial de conversación actual es:\n   {{JSON.stringify($node[\"Upsert Session Info\"].json.context_window)}}\n6. El resumen del perfil del paciente es:\n   {{JSON.stringify($node[\"Upsert Patient Profile\"].json.cross_appointment_summary)}}\n7. Responde de forma muy profesional y breve (menos de 200 caracteres).\n\nMensaje actual del paciente: \"{{$node[\"Prepare Profile Query Info\"].json.messageContent}}\"\n\nEscribe tu respuesta corta en español:"
+      },
+      "id": "e0b3dd1d-7aa3-4ee2-b91c-8ffbe6daedfe",
+      "name": "Constitute System Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2320,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const generatedText = $node[\"Layer 2 Prompt Agent\"].json.text || $node[\"Layer 2 Prompt Agent\"].json.message.content || '';\nconst medicalBlocklist = [\n  \"antibiótico\", \"anestesia\", \"caries\", \"conducto\", \"empaste\",\n  \"endodoncia\", \"extracción\", \"gingivitis\", \"implante\", \"inflamación\",\n  \"infección\", \"ortodoncia\", \"periodontitis\", \"prótesis\", \"pulir\",\n  \"rayos x\", \"radiografía\", \"sangrado\", \"tumor\", \"úlcera\"\n];\n\nconst lowerText = generatedText.toLowerCase();\nlet hasMedicalViolations = false;\nfor (const term of medicalBlocklist) {\n  if (lowerText.includes(term)) {\n    hasMedicalViolations = true;\n    break;\n  }\n}\n\nconst tooLong = generatedText.length > 200;\nconst isApproved = !hasMedicalViolations && !tooLong && generatedText.trim().length > 0;\n\nreturn [{\n  json: {\n    replyText: generatedText,\n    approved: isApproved,\n    reason: isApproved ? \"\" : (hasMedicalViolations ? \"medical_term_detected\" : \"too_long\")\n  }\n}];"
+      },
+      "id": "ccffbfa4-0aab-46fe-bbd3-059cbe778bef",
+      "name": "Layer 3 Post-Validation",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2490,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{$json.approved}}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "d09fe91e-f00e-44fa-9ed1-a76fcee5bea3",
+      "name": "Route Approved Logic",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        2660,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "text",
+        "operation": "send",
+        "instanceName": "={{process.env.EVOLUTION_INSTANCE_NAME || 'clinic-notifier'}}",
+        "number": "={{$node[\"Prepare Profile Query Info\"].json.phone}}",
+        "text": "={{$json.replyText}}"
+      },
+      "id": "8902ffcc-8a3a-4a61-9c8e-a22fb1de2101",
+      "name": "Send AI Reply WhatsApp",
+      "type": "n8n-nodes-evolution-api.evolutionApi",
+      "typeVersion": 1,
+      "position": [
+        2830,
+        50
+      ],
+      "credentials": {
+        "n8n-nodes-evolution-api.evolutionApi": {
+          "id": "evolution-api-credentials-id"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO patient_replies (phone_number, message_content, appointment_id, session_id, patient_profile_id, bot_response, escalation_status, conversation_log) VALUES ($1, $2, $3, $4, $5, $6, 'none', $7::jsonb) RETURNING id;",
+        "queryParams": "={{$node[\"Prepare Profile Query Info\"].json.phone}}, {{$node[\"Prepare Profile Query Info\"].json.messageContent}}, {{$node[\"Prepare Profile Query Info\"].json.appointmentId}}, {{$node[\"Upsert Session Info\"].json.id}}, {{$node[\"Upsert Patient Profile\"].json.id}}, {{$node[\"Layer 3 Post-Validation\"].json.replyText}}, =[]"
+      },
+      "id": "31278ffc-18df-4ef6-bea2-817ba6d9ef11",
+      "name": "Log Success DB Reply",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        3000,
+        50
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-credentials-id"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const session = $node[\"Upsert Session Info\"].json;\nconst newMsgPatient = { role: \"patient\", content: $node[\"Prepare Profile Query Info\"].json.messageContent, timestamp: new Date().toISOString() };\nconst newMsgBot = { role: \"bot\", content: $node[\"Layer 3 Post-Validation\"].json.replyText, timestamp: new Date().toISOString() };\n\nconst window = Array.isArray(session.context_window) ? session.context_window : [];\nwindow.push(newMsgPatient);\nwindow.push(newMsgBot);\n\n// Keep last 10 messages\nif (window.length > 10) {\n  window.splice(0, window.length - 10);\n}\n\nreturn [{ json: { context_window: window, sessionId: session.id } }];"
+      },
+      "id": "cc00bfa4-0a32-4ca2-8877-bb89ae6fb411",
+      "name": "Update Context Object",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3170,
+        50
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE conversation_sessions SET context_window = $1::jsonb WHERE id = $2;",
+        "queryParams": "={{JSON.stringify($json.context_window)}}, {{$json.sessionId}}"
+      },
+      "id": "19bfa6a1-6af4-411a-8bbd-986cbeefba11",
+      "name": "Commit Session Context Memory",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        3340,
+        50
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-credentials-id"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const reason = $node[\"Route classification\"].json.allowed === false ? $node[\"Parse Classification\"].json.reason : $node[\"Layer 3 Post-Validation\"].json.reason;\nreturn [{ json: { reason } }];"
+      },
+      "id": "e8812ee4-e6b7-4fe0-bad2-e228febeae02",
+      "name": "Amalgamate Escalation Reason",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2150,
+        450
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "text",
+        "operation": "send",
+        "instanceName": "={{process.env.EVOLUTION_INSTANCE_NAME || 'clinic-notifier'}}",
+        "number": "={{$node[\"Prepare Profile Query Info\"].json.phone}}",
+        "text": "Gracias por su mensaje. Un miembro del personal de la clínica se pondrá en contacto con usted en horario de consulta pronto."
+      },
+      "id": "8902ffcc-8a3a-4a61-9c8e-a22fb1de2102",
+      "name": "Send Escalate WhatsApp",
+      "type": "n8n-nodes-evolution-api.evolutionApi",
+      "typeVersion": 1,
+      "position": [
+        2320,
+        450
+      ],
+      "credentials": {
+        "n8n-nodes-evolution-api.evolutionApi": {
+          "id": "evolution-api-credentials-id"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO patient_replies (phone_number, message_content, appointment_id, session_id, patient_profile_id, bot_response, escalation_status, escalation_reason, conversation_log) VALUES ($1, $2, $3, $4, $5, $6, 'escalated', $7, $8::jsonb);",
+        "queryParams": "={{$node[\"Prepare Profile Query Info\"].json.phone}}, {{$node[\"Prepare Profile Query Info\"].json.messageContent}}, {{$node[\"Prepare Profile Query Info\"].json.appointmentId}}, {{$node[\"Upsert Session Info\"].json.id}}, {{$node[\"Upsert Patient Profile\"].json.id}}, 'Gracias por su mensaje...', {{$node[\"Amalgamate Escalation Reason\"].json.reason}}, =[]"
+      },
+      "id": "31278ffc-18df-4ef6-bea2-817ba6d9ef12",
+      "name": "Log Escalated DB Reply",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        2490,
+        450
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-credentials-id"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "text",
+        "operation": "send",
+        "instanceName": "={{process.env.EVOLUTION_INSTANCE_NAME || 'clinic-notifier'}}",
+        "number": "={{$node[\"Prepare Profile Query Info\"].json.phone}}",
+        "text": "=Gracias por su mensaje. Nuestro de horario de atención es de {{$node[\"Load Bot Config\"].json.config.business_hours_start}} a {{$node[\"Load Bot Config\"].json.config.business_hours_end}}. Le responderemos en el próximo horario de trabajo."
+      },
+      "id": "5902ffcc-8a3a-4a61-9c8e-a22fb1de2103",
+      "name": "Send Outside Hours Reply",
+      "type": "n8n-nodes-evolution-api.evolutionApi",
+      "typeVersion": 1,
+      "position": [
+        780,
+        500
+      ],
+      "credentials": {
+        "n8n-nodes-evolution-api.evolutionApi": {
+          "id": "evolution-api-credentials-id"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO patient_replies (phone_number, message_content, bot_response, escalation_status, escalation_reason, conversation_log) VALUES ($1, $2, $3, 'escalated', 'outside_business_hours', =[]);",
+        "queryParams": "= '+' + {{$node[\"Evolution Webhook\"].json.data.key.remoteJid.split('@')[0]}}, {{$node[\"Evolution Webhook\"].json.data.message.conversation}}, =Gracias por su mensaje. Nuestro de horario de atención..."
+      },
+      "id": "31278ffc-18df-4ef6-bea2-817ba6d9ef13",
+      "name": "Log Outside Hours Db Record",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        950,
+        500
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-credentials-id"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Evolution Webhook": {
+      "main": [
+        [
+          {
+            "node": "Acknowledge Immediately",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Load Bot Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Bot Config": {
+      "main": [
+        [
+          {
+            "node": "Business Hours Guard",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Business Hours Guard": {
+      "main": [
+        [
+          {
+            "node": "Check Hours Route",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Hours Route": {
+      "main": [
+        [
+          {
+            "node": "Fetch Last Appointment",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send Outside Hours Reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Last Appointment": {
+      "main": [
+        [
+          {
+            "node": "Prepare Profile Query Info",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Profile Query Info": {
+      "main": [
+        [
+          {
+            "node": "Upsert Patient Profile",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upsert Patient Profile": {
+      "main": [
+        [
+          {
+            "node": "Upsert Session Info",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upsert Session Info": {
+      "main": [
+        [
+          {
+            "node": "Layer 1 Topic Classifier",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Layer 1 Topic Classifier": {
+      "main": [
+        [
+          {
+            "node": "Classification Instructions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Classification Instructions": {
+      "main": [
+        [
+          {
+            "node": "Parse Classification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Classification": {
+      "main": [
+        [
+          {
+            "node": "Route classification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route classification": {
+      "main": [
+        [
+          {
+            "node": "Layer 2 Prompt Agent",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Amalgamate Escalation Reason",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Layer 2 Prompt Agent": {
+      "main": [
+        [
+          {
+            "node": "Constitute System Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Constitute System Prompt": {
+      "main": [
+        [
+          {
+            "node": "Layer 3 Post-Validation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Layer 3 Post-Validation": {
+      "main": [
+        [
+          {
+            "node": "Route Approved Logic",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route Approved Logic": {
+      "main": [
+        [
+          {
+            "node": "Send AI Reply WhatsApp",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Amalgamate Escalation Reason",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send AI Reply WhatsApp": {
+      "main": [
+        [
+          {
+            "node": "Log Success DB Reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Success DB Reply": {
+      "main": [
+        [
+          {
+            "node": "Update Context Object",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Context Object": {
+      "main": [
+        [
+          {
+            "node": "Commit Session Context Memory",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Amalgamate Escalation Reason": {
+      "main": [
+        [
+          {
+            "node": "Send Escalate WhatsApp",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Escalate WhatsApp": {
+      "main": [
+        [
+          {
+            "node": "Log Escalated DB Reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Outside Hours Reply": {
+      "main": [
+        [
+          {
+            "node": "Log Outside Hours Db Record",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "id": "receive-reply-workflow"
+}
+]

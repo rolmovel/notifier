@@ -1,0 +1,119 @@
+[
+{
+  "name": "System Health Check",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "value": 15
+            }
+          ]
+        }
+      },
+      "id": "e67ebfa4-01bf-44df-be92-e78fbcfedfc1",
+      "name": "Interval 15m Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [
+        100,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "url": "http://evolution-api:8080/health",
+        "options": {}
+      },
+      "id": "ac00bfea-71bf-4bda-a89d-e18fabcedfeb",
+      "name": "Check Evolution Health",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        300,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT 1;",
+        "queryParams": ""
+      },
+      "id": "90ba95ce-61ba-470a-867c-9ef402319efd",
+      "name": "Check Postgres Connection",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        300,
+        400
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-credentials-id"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const evoHealth = $node[\"Check Evolution Health\"].json;\nconst pgHealth = $node[\"Check Postgres Connection\"].json;\n\nreturn [{\n  json: {\n    timestamp: new Date().toISOString(),\n    components: {\n      evolution_api: evoHealth.status || \"offline\",\n      postgres: pgHealth ? \"healthy\" : \"offline\"\n    },\n    system_status: (evoHealth.status === \"healthy\" || evoHealth.status === \"open\") ? \"optimal\" : \"degraded\"\n  }\n}];"
+      },
+      "id": "cc00bfa4-0a32-4ca2-8877-bb89ae6fb412",
+      "name": "Consolidate Health Node",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        500,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "Interval 15m Trigger": {
+      "main": [
+        [
+          {
+            "node": "Check Evolution Health",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Check Postgres Connection",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Evolution Health": {
+      "main": [
+        [
+          {
+            "node": "Consolidate Health Node",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Postgres Connection": {
+      "main": [
+        [
+          {
+            "node": "Consolidate Health Node",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "id": "health-check-workflow"
+}
+]

@@ -1,0 +1,8 @@
+Hola {{patient_name}},
+
+Le recordamos su próxma cita en {{clinic_name}}:
+📅 Fecha: {{appointment_date}}
+🕐 Hora: {{appointment_time}}
+🦷 Especialidad: {{appointment_type}}
+
+Por favor, responda a este mensaje si tiene alguna pregunta o si necesita modificar su horario.

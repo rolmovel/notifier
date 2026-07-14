@@ -1,0 +1,474 @@
+[
+  {
+    "name": "Send Appointment Notifications",
+    "nodes": [
+      {
+        "parameters": {
+          "httpMethod": "POST",
+          "path": "upload-appointments",
+          "responseMode": "responseNode",
+          "options": {
+            "rawBody": false,
+            "binaryData": true
+          }
+        },
+        "id": "d0407a11-0965-4f40-b6da-c70aae885061",
+        "webhookId": "d0407a11-0965-4f40-b6da-c70aae885061",
+        "name": "Upload Webhook",
+        "type": "n8n-nodes-base.webhook",
+        "typeVersion": 1,
+        "position": [
+          100,
+          300
+        ]
+      },
+      {
+        "parameters": {
+          "operation": "fromFile",
+          "options": {
+            "headerRow": true,
+            "readAsString": true
+          }
+        },
+        "id": "e305ffae-1a3b-4861-bf96-98dc42f31b81",
+        "name": "Parse File Node",
+        "type": "n8n-nodes-base.spreadsheetFile",
+        "typeVersion": 1,
+        "position": [
+          260,
+          300
+        ]
+      },
+      {
+        "parameters": {
+          "jsCode": "const items = $input.all();\nconst results = [];\nconst batchId = $node[\"Upload Webhook\"].json.body.batchId || ('xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) { const r = Math.random() * 16 | 0; const v = c === 'x' ? r : (r & 0x3 | 0x8); return v.toString(16); }));\nconst defaultCountryCode = process.env.DEFAULT_COUNTRY_CODE || '+34';\n\nfunction toDateString(value) {\n  if (typeof value === 'number') {\n    const d = new Date((value - 25569) * 24 * 60 * 60 * 1000);\n    return d.toISOString().split('T')[0];\n  }\n  if (value instanceof Date) {\n    return value.toISOString().split('T')[0];\n  }\n  return value ? String(value).trim() : '';\n}\n\nfunction toTimeString(value) {\n  if (typeof value === 'number') {\n    const d = new Date(value * 24 * 60 * 60 * 1000);\n    return d.toISOString().split('T')[1].slice(0, 5);\n  }\n  if (value instanceof Date) {\n    return value.toISOString().split('T')[1].slice(0, 5);\n  }\n  return value ? String(value).trim() : '';\n}\n\nfor (let i = 0; i < items.length; i++) {\n  const row = items[i].json;\n  const errors = [];\n  let phone = row.patient_phone ? String(row.patient_phone).trim() : '';\n  const appointmentDate = toDateString(row.appointment_date);\n  const appointmentTime = toTimeString(row.appointment_time);\n  \n  // Basic Validation and Normalization\n  if (!row.patient_name || String(row.patient_name).trim() === '') {\n    errors.push('patient_name: Patient name is required');\n  }\n  \n  if (phone === '') {\n    errors.push('patient_phone: Phone number is required');\n  } else {\n    // Phone normalization (if country code missing)\n    if (!phone.startsWith('+')) {\n      if (phone.startsWith('00')) {\n        phone = '+' + phone.substring(2);\n      } else if (defaultCountryCode) {\n        // Strip leading zeros if present when appending default country code\n        const cleanPhone = phone.replace(/^0+/, '');\n        phone = defaultCountryCode + cleanPhone;\n      }\n    }\n    \n    // Validate against E.164 regex\n    if (!/^\\+[1-9]\\d{6,14}$/.test(phone)) {\n      errors.push(`patient_phone: Invalid format ${phone}. Expected international format (e.g., +34612345678)`);\n    }\n  }\n  \n  if (!appointmentDate || !/^\\d{4}-\\d{2}-\\d{2}$/.test(appointmentDate)) {\n    errors.push('appointment_date: Invalid format. Expected YYYY-MM-DD');\n  }\n  \n  if (!appointmentTime || !/^([01]\\d|2[0-3]):([0-5]\\d)$/.test(appointmentTime)) {\n    errors.push('appointment_time: Invalid format. Expected HH:MM');\n  }\n  \n  if (!row.appointment_type || String(row.appointment_type).trim() === '') {\n    errors.push('appointment_type: Appointment type is required');\n  }\n  \n  results.push({\n    json: {\n      rowNumber: i + 1,\n      patient_name: row.patient_name ? String(row.patient_name).trim() : '',\n      patient_phone: phone,\n      appointment_date: appointmentDate,\n      appointment_time: appointmentTime,\n      appointment_type: row.appointment_type ? String(row.appointment_type).trim() : '',\n      batch_id: batchId,\n      is_valid: errors.length === 0,\n      errors: errors.length > 0 ? errors : null\n    }\n  });\n}\n\nreturn results;"
+        },
+        "id": "e6741be4-3705-472e-8c31-c0efbe7da2fe",
+        "name": "Validation and Normalization",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          430,
+          300
+        ]
+      },
+      {
+        "parameters": {
+          "conditions": {
+            "boolean": [
+              {
+                "value1": "={{$json.is_valid}}",
+                "value2": true
+              }
+            ]
+          }
+        },
+        "id": "e9cebd9f-bba3-448f-9e7f-5dcba9b8f2dd",
+        "name": "Split Valid/Invalid Paths",
+        "type": "n8n-nodes-base.if",
+        "typeVersion": 1,
+        "position": [
+          600,
+          300
+        ]
+      },
+      {
+        "parameters": {
+          "operation": "executeQuery",
+          "query": "INSERT INTO appointments (patient_name, patient_phone, appointment_date, appointment_time, appointment_type, notification_status, batch_id) VALUES ($1, $2, $3, $4, $5, 'pending', $6) RETURNING id, patient_name, patient_phone, appointment_date, appointment_time, appointment_type, batch_id;",
+          "options": {
+            "queryReplacement": "={{$json.patient_name}}, {{$json.patient_phone}}, {{$json.appointment_date}}, {{$json.appointment_time}}, {{$json.appointment_type}}, {{$json.batch_id}}"
+          }
+        },
+        "id": "90ba95ce-61ba-470a-867c-9ef402319efc",
+        "name": "Save Valid to DB",
+        "type": "n8n-nodes-base.postgres",
+        "typeVersion": 2,
+        "position": [
+          780,
+          200
+        ],
+        "credentials": {
+          "postgres": {
+            "id": "postgres-credentials-id",
+            "name": "Postgres Notifier"
+          }
+        }
+      },
+      {
+        "parameters": {
+          "jsCode": "const items = $input.all();\nconst batchId = items[0]?.json?.batch_id || 'unknown';\nconst validRecords = items.filter(i => i.json.is_valid);\nconst invalidRecords = items.filter(i => !i.json.is_valid);\n\nreturn [{\n  json: {\n    batchId: batchId,\n    totalRecords: items.length,\n    validRecords: validRecords.length,\n    invalidRecords: invalidRecords.length,\n    status: \"processing\",\n    message: `File received and validated. Sending ${validRecords.length} notifications.`,\n    invalidDetails: invalidRecords.map(i => ({\n      rowNumber: i.json.rowNumber,\n      patientName: i.json.patient_name,\n      errors: i.json.errors\n    }))\n  }\n}];"
+        },
+        "id": "f5ea7cde-9a57-418b-ae0e-8fb85c5df05b",
+        "name": "Prepare Sync Response",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          780,
+          450
+        ]
+      },
+      {
+        "parameters": {
+          "respondWith": "allIncomingItems",
+          "options": {}
+        },
+        "id": "a90bbfe9-ebff-410a-b333-6cfcdcf5ddcc",
+        "name": "Send Immediate Response",
+        "type": "n8n-nodes-base.respondToWebhook",
+        "typeVersion": 1,
+        "position": [
+          950,
+          450
+        ]
+      },
+      {
+        "parameters": {
+          "resource": "messages-api",
+          "operation": "send-text",
+          "instanceName": "={{process.env.EVOLUTION_INSTANCE_NAME || 'clinic-notifier'}}",
+          "remoteJid": "={{$json.patient_phone}}",
+          "messageText": "=Hola {{$json.patient_name}},\n\nLe recordamos su cita el próximo {{$json.appointment_date}} a las {{$json.appointment_time}} para {{$json.appointment_type}}.\n\nPor favor, responda 'CONFIRMAR' para ratificar su asistencia o póngase en contacto si necesita reprogramar.\n\n¡Gracias!"
+        },
+        "id": "8902ffcc-8a3a-4a61-9c8e-a22fb1de211b",
+        "name": "Send WhatsApp Node",
+        "type": "n8n-nodes-evolution-api.evolutionApi",
+        "typeVersion": 1,
+        "position": [
+          1000,
+          200
+        ],
+        "credentials": {
+          "evolutionApi": {
+            "id": "evolution-api-credentials-id",
+            "name": "Evolution API Notifier"
+          }
+        },
+        "retryOnFail": true,
+        "maxRetries": 3,
+        "delayBetweenRetries": 5000
+      },
+      {
+        "parameters": {
+          "operation": "executeQuery",
+          "query": "UPDATE appointments SET notification_status = 'sent', notification_sent_at = NOW() WHERE id = $1 RETURNING id, patient_phone;",
+          "options": {
+            "queryReplacement": "={{$json.id}}"
+          }
+        },
+        "id": "19bfa6a1-6af4-411a-8bbd-986cbeefba99",
+        "name": "Update DB Sent Status",
+        "type": "n8n-nodes-base.postgres",
+        "typeVersion": 2,
+        "position": [
+          1180,
+          120
+        ],
+        "credentials": {
+          "postgres": {
+            "id": "postgres-credentials-id",
+            "name": "Postgres Notifier"
+          }
+        }
+      },
+      {
+        "parameters": {
+          "operation": "executeQuery",
+          "query": "UPDATE appointments SET notification_status = 'failed', error_reason = $1 WHERE id = $2;",
+          "options": {
+            "queryReplacement": "={{$json.error.message}}, {{$item(\"Save Valid to DB\").json.id}}"
+          }
+        },
+        "id": "49b2ff88-29cf-43bd-9b0d-ea0cc17c91fa",
+        "name": "Update DB Failed Status",
+        "type": "n8n-nodes-base.postgres",
+        "typeVersion": 2,
+        "position": [
+          1180,
+          280
+        ],
+        "credentials": {
+          "postgres": {
+            "id": "postgres-credentials-id",
+            "name": "Postgres Notifier"
+          }
+        }
+      },
+      {
+        "parameters": {
+          "operation": "executeQuery",
+          "query": "INSERT INTO notification_records (appointment_id, phone_number, message_content, send_status, timestamp) VALUES ($1, $2, $3, 'success', NOW());",
+          "options": {
+            "queryReplacement": "={{$json.id}}, {{$json.patient_phone}}, Recordatorio de cita enviado"
+          }
+        },
+        "id": "31278ffc-18df-4ef6-bea2-817ba6d9efb8",
+        "name": "Log Notification Sent Success",
+        "type": "n8n-nodes-base.postgres",
+        "typeVersion": 2,
+        "position": [
+          1380,
+          120
+        ],
+        "credentials": {
+          "postgres": {
+            "id": "postgres-credentials-id",
+            "name": "Postgres Notifier"
+          }
+        }
+      },
+      {
+        "parameters": {
+          "operation": "executeQuery",
+          "query": "INSERT INTO notification_records (appointment_id, phone_number, message_content, send_status, error_reason, timestamp) VALUES ($1, $2, $3, 'failed', $4, NOW());",
+          "options": {
+            "queryReplacement": "={{$item(\"Save Valid to DB\").json.id}}, {{$item(\"Save Valid to DB\").json.patient_phone}}, Recordatorio de cita enviado, {{$json.error ? $json.error.message : 'unknown'}}"
+          }
+        },
+        "id": "4982ee33-eadd-47da-bf2e-0a567eaebdc2",
+        "name": "Log Notification Sent Failure",
+        "type": "n8n-nodes-base.postgres",
+        "typeVersion": 2,
+        "position": [
+          1380,
+          280
+        ],
+        "credentials": {
+          "postgres": {
+            "id": "postgres-credentials-id",
+            "name": "Postgres Notifier"
+          }
+        }
+      },
+      {
+        "parameters": {
+          "httpMethod": "GET",
+          "path": "notification-results/:batchId",
+          "responseMode": "responseNode",
+          "options": {}
+        },
+        "id": "ccaaa333-e11a-4632-9cb4-72fab6beff2e",
+        "webhookId": "ccaaa333-e11a-4632-9cb4-72fab6beff2e",
+        "name": "Get Results Webhook",
+        "type": "n8n-nodes-base.webhook",
+        "typeVersion": 1,
+        "position": [
+          100,
+          650
+        ]
+      },
+      {
+        "parameters": {
+          "operation": "executeQuery",
+          "query": "SELECT COUNT(*) AS total, SUM(CASE WHEN notification_status = 'sent' THEN 1 ELSE 0 END) AS sent, SUM(CASE WHEN notification_status = 'failed' THEN 1 ELSE 0 END) AS failed, SUM(CASE WHEN notification_status = 'pending' THEN 1 ELSE 0 END) AS pending FROM appointments WHERE batch_id = $1;",
+          "options": {
+            "queryReplacement": "={{$json.params.batchId}}"
+          }
+        },
+        "id": "787bbfa4-acab-46fe-bbd3-059cbe778ae9",
+        "name": "Get Batch Stat Summary",
+        "type": "n8n-nodes-base.postgres",
+        "typeVersion": 2,
+        "position": [
+          280,
+          650
+        ],
+        "credentials": {
+          "postgres": {
+            "id": "postgres-credentials-id",
+            "name": "Postgres Notifier"
+          }
+        }
+      },
+      {
+        "parameters": {
+          "operation": "executeQuery",
+          "query": "SELECT patient_name, patient_phone, error_reason, retry_count FROM appointments WHERE batch_id = $1 AND notification_status = 'failed';",
+          "options": {
+            "queryReplacement": "={{$node[\"Get Results Webhook\"].json.params.batchId}}"
+          }
+        },
+        "id": "dd11be24-7472-463e-acdb-88c9ae7de91e",
+        "name": "Get Failed Records Detail",
+        "type": "n8n-nodes-base.postgres",
+        "typeVersion": 2,
+        "position": [
+          450,
+          650
+        ],
+        "credentials": {
+          "postgres": {
+            "id": "postgres-credentials-id",
+            "name": "Postgres Notifier"
+          }
+        }
+      },
+      {
+        "parameters": {
+          "jsCode": "const summary = $node[\"Get Batch Stat Summary\"].json;\nconst failedDetails = $input.all();\nconst batchId = $node[\"Get Results Webhook\"].json.params.batchId;\n\nreturn [{\n  json: {\n    batchId: batchId,\n    status: (summary.pending > 0) ? \"processing\" : \"completed\",\n    summary: {\n      totalAppointments: Number(summary.total || 0),\n      sent: Number(summary.sent || 0),\n      failed: Number(summary.failed || 0),\n      pending: Number(summary.pending || 0)\n    },\n    failedRecords: failedDetails.map(item => ({\n      patientName: item.json.patient_name,\n      phoneNumber: item.json.patient_phone,\n      errorReason: item.json.error_reason,\n      retryCount: item.json.retry_count\n    }))\n  }\n}];"
+        },
+        "id": "e98e3dd4-0a32-4ca2-8877-bb89ae6fb472",
+        "name": "Formulate Retrieval Response",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          630,
+          650
+        ]
+      },
+      {
+        "parameters": {
+          "respondWith": "lastNodeType",
+          "options": {}
+        },
+        "id": "a98ebbaa-22df-4bc9-93e1-229ae7dedfef",
+        "name": "Return Batch Retrieval Result",
+        "type": "n8n-nodes-base.respondToWebhook",
+        "typeVersion": 1,
+        "position": [
+          800,
+          650
+        ]
+      }
+    ],
+    "connections": {
+      "Upload Webhook": {
+        "main": [
+          [
+            {
+              "node": "Parse File Node",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Parse File Node": {
+        "main": [
+          [
+            {
+              "node": "Validation and Normalization",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Validation and Normalization": {
+        "main": [
+          [
+            {
+              "node": "Split Valid/Invalid Paths",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Prepare Sync Response",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Split Valid/Invalid Paths": {
+        "main": [
+          [
+            {
+              "node": "Save Valid to DB",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          []
+        ]
+      },
+      "Prepare Sync Response": {
+        "main": [
+          [
+            {
+              "node": "Send Immediate Response",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Save Valid to DB": {
+        "main": [
+          [
+            {
+              "node": "Update DB Sent Status",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Send WhatsApp Node",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Update DB Sent Status": {
+        "main": [
+          [
+            {
+              "node": "Log Notification Sent Success",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Get Results Webhook": {
+        "main": [
+          [
+            {
+              "node": "Get Batch Stat Summary",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Get Batch Stat Summary": {
+        "main": [
+          [
+            {
+              "node": "Get Failed Records Detail",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Get Failed Records Detail": {
+        "main": [
+          [
+            {
+              "node": "Formulate Retrieval Response",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Formulate Retrieval Response": {
+        "main": [
+          [
+            {
+              "node": "Return Batch Retrieval Result",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    },
+    "active": true,
+    "settings": {
+      "executionOrder": "v1"
+    },
+    "id": "send-appointments-workflow"
+  }
+]

@@ -1,0 +1,40 @@
+{
+  "version": "1.0.0",
+  "confidence_threshold": 0.7,
+  "max_response_length": 200,
+  "blocked_topics": [
+    "medical_symptoms",
+    "medication",
+    "diagnosis",
+    "treatment_advice",
+    "test_results",
+    "pricing_billing",
+    "other_patient_data",
+    "appointment_modification"
+  ],
+  "allowed_topics": [
+    "appointment_time",
+    "appointment_date",
+    "appointment_type",
+    "clinic_location",
+    "appointment_confirmation"
+  ],
+  "medical_term_blocklist": [
+    "antibiótico", "anestesia", "caries", "conducto", "empaste",
+    "endodoncia", "extracción", "gingivitis", "implante", "inflamación",
+    "infección", "ortodoncia", "periodontitis", "prótesis", "pulir",
+    "rayos x", "radiografía", "sangrado", "tumor", "úlcera"
+  ],
+  "escalation_message": "Gracias por su mensaje. Un miembro del personal de la clínica se pondrá en contacto con usted en horario de consulta.",
+  "out_of_hours_message": "Gracias por su mensaje. Nuestro horario de atención es de {{business_hours_start}} a {{business_hours_end}}. Le responderemos en el próximo horario de consulta.",
+  "staff_notification_template": "ESCALACIÓN: El paciente {{patient_name}} ({{patient_phone}}) ha enviado un mensaje que requiere atención manual. Motivo: {{escalation_reason}}. Mensaje: {{message_content}}",
+  "memory": {
+    "session_context_window": 10,
+    "enable_cross_appointment_memory": true,
+    "profile_memory_retention_days": 90,
+    "max_known_preferences": 5,
+    "max_last_topics": 5,
+    "session_expiry_hours": 72,
+    "session_close_after_appointment_hours": 24
+  }
+}
