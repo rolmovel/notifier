@@ -4,7 +4,7 @@ build-backend = "setuptools.backends._legacy:_Backend"
 
 [project]
 name = "whatsapp-desktop-utility"
-version = "1.0.0"
+version = "1.0.2"
 description = "Desktop utility for sending WhatsApp appointment reminders from Excel files"
 requires-python = ">=3.11"
 dependencies = [

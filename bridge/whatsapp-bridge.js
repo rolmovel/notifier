@@ -90,7 +90,7 @@ async function startBaileys() {
                 fs.mkdirSync(authDir, { recursive: true });
                 connectionState = 'close';
                 startBaileys();
-            } else if (statusCode !== DisconnectReason.restartRequired) {
+            } else {
                 connectionState = 'close';
                 // Reconnect
                 console.log('Reconnecting...');
