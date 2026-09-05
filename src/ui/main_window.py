@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
@@ -165,8 +165,78 @@ class MainWindow(QMainWindow):
         # --- Status bar ---
         self._status_bar = QStatusBar()
         self.setStatusBar(self._status_bar)
-        self._status_label = QLabel("🔴 Desconectado")
-        self._status_bar.addPermanentWidget(self._status_label)
+        self._status_btn = QPushButton("🔴 Desconectado")
+        self._status_btn.setFlat(False)
+        self._status_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._status_btn.clicked.connect(self._on_status_btn_click)
+        self._status_bar.addPermanentWidget(self._status_btn)
+
+    def _on_status_btn_click(self) -> None:
+        """Handle click on the status button — connect or disconnect."""
+        import httpx
+        try:
+            resp = httpx.get(f"{self._bridge_url}/status", timeout=3.0)
+            status = resp.json()
+            state = status.get("state", "close")
+        except Exception:
+            state = "close"
+
+        if state == "open":
+            self._do_disconnect()
+        else:
+            self._do_connect()
+
+    def _do_connect(self) -> None:
+        """Open settings dialog on the Conexión tab to connect."""
+        dialog = SettingsDialog(self._settings, self._settings_store, self._bridge_url, self)
+        dialog._tabs.setCurrentIndex(1)
+        dialog.exec()
+        self._update_status_bar()
+
+    def _do_disconnect(self) -> None:
+        """Disconnect WhatsApp in a background thread."""
+        reply = QMessageBox.question(
+            self,
+            "Desconectar WhatsApp",
+            "¿Seguro que quieres desconectar WhatsApp?\n\n"
+            "Esto cerrará la sesión actual y permitirás\n"
+            "vincular un número diferente.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        self._status_btn.setEnabled(False)
+        self._status_btn.setText("� Desconectando...")
+
+        import threading
+        self._disconnect_result = None
+
+        def do_logout() -> None:
+            import asyncio
+            loop = asyncio.new_event_loop()
+            try:
+                self._disconnect_result = loop.run_until_complete(
+                    self._whatsapp_client.logout()
+                )
+            except Exception:
+                self._disconnect_result = False
+            finally:
+                loop.close()
+
+        threading.Thread(target=do_logout, daemon=True).start()
+        QTimer.singleShot(100, self._poll_disconnect)
+
+    def _poll_disconnect(self) -> None:
+        """Poll the background disconnect thread until it finishes."""
+        if self._disconnect_result is None:
+            QTimer.singleShot(100, self._poll_disconnect)
+            return
+        self._status_btn.setEnabled(True)
+        self._update_status_bar()
+        if not self._disconnect_result:
+            QMessageBox.warning(self, "Error", "No se pudo desconectar WhatsApp.")
 
     def _update_status_bar(self) -> None:
         """Update the WhatsApp connection status indicator."""
@@ -176,13 +246,17 @@ class MainWindow(QMainWindow):
             status = resp.json()
             state = status.get("state", "close")
             if state == "open":
-                self._status_label.setText("🟢 Conectado")
+                self._status_btn.setText("🟢 Conectado  |  Click para desconectar")
+                self._status_btn.setStyleSheet("QPushButton { color: #2d7d2d; font-weight: bold; padding: 2px 8px; }")
             elif state == "connecting":
-                self._status_label.setText("🟡 Conectando...")
+                self._status_btn.setText("🟡 Conectando...")
+                self._status_btn.setStyleSheet("QPushButton { color: #b8860b; font-weight: bold; padding: 2px 8px; }")
             else:
-                self._status_label.setText("🔴 Desconectado")
+                self._status_btn.setText("🔴 Desconectado  |  Click para conectar")
+                self._status_btn.setStyleSheet("QPushButton { color: #cc3333; font-weight: bold; padding: 2px 8px; }")
         except Exception:
-            self._status_label.setText("🔴 Desconectado")
+            self._status_btn.setText("🔴 Desconectado  |  Click para conectar")
+            self._status_btn.setStyleSheet("QPushButton { color: #cc3333; font-weight: bold; padding: 2px 8px; }")
 
     def _on_open_settings(self) -> None:
         """Open the settings dialog."""
