@@ -186,7 +186,7 @@ class MainWindow(QMainWindow):
 
     def _on_open_settings(self) -> None:
         """Open the settings dialog."""
-        dialog = SettingsDialog(self._settings, self._settings_store, self)
+        dialog = SettingsDialog(self._settings, self._settings_store, self._bridge_url, self)
         if dialog.exec() == SettingsDialog.DialogCode.Accepted:
             self._status_bar.showMessage("Configuración guardada", 3000)
 

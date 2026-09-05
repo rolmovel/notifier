@@ -31,7 +31,7 @@ def _get_bridge_dir() -> Path:
 BRIDGE_SCRIPT = _get_bridge_dir() / "whatsapp-bridge.js"
 
 # Maximum time to wait for bridge to become responsive (seconds)
-_BRIDGE_STARTUP_TIMEOUT = 10
+_BRIDGE_STARTUP_TIMEOUT = 20
 
 # Polling interval for health check (seconds)
 _POLL_INTERVAL = 0.5
@@ -94,8 +94,8 @@ class BridgeManager:
             try:
                 self._process = subprocess.Popen(
                     ["node", str(BRIDGE_SCRIPT), "--port", str(self._port)],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
                     cwd=str(BRIDGE_SCRIPT.parent),
                     # Create a new process group so we can kill the whole tree
                     start_new_session=True,

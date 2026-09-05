@@ -36,6 +36,7 @@ class QrDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self._bridge_url = bridge_url
+        self._qr_shown = False
         self._setup_ui()
         self._poll_timer = QTimer(self)
         self._poll_timer.timeout.connect(self._check_connection)
@@ -107,6 +108,7 @@ class QrDialog(QDialog):
             data = resp.json()
             qr_code = data.get("qr_code")
             if qr_code:
+                self._qr_shown = True
                 self._display_qr(qr_code)
             else:
                 self._qr_label.setText(
@@ -143,6 +145,7 @@ class QrDialog(QDialog):
             data = resp.json()
 
             if resp.status_code == 200 and data.get("pairing_code"):
+                self._qr_shown = True
                 code = data["pairing_code"]
                 # Format as XX-XX-XX-XX for readability
                 formatted = f"{code[0:2]}-{code[2:4]}-{code[4:6]}-{code[6:8]}"
@@ -215,14 +218,19 @@ class QrDialog(QDialog):
             self._qr_label.setText(f"Error al mostrar QR: {exc}")
 
     def _check_connection(self) -> None:
-        """Poll the bridge status and close dialog if connected."""
+        """Poll the bridge status, auto-refresh QR if needed, and close dialog if connected."""
         try:
             resp = httpx.get(f"{self._bridge_url}/status", timeout=5.0)
             status = resp.json()
-            if status.get("state") == "open":
+            state = status.get("state", "close")
+            if state == "open":
                 logger.info("WhatsApp connected, closing QR dialog")
                 self._poll_timer.stop()
                 self.accept()
+                return
+            # Auto-refresh the QR while waiting for it to become available
+            if not self._qr_shown and state != "open":
+                self._refresh_qr()
         except Exception as exc:
             logger.debug("Connection check error: %s", exc)
 

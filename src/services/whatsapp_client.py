@@ -104,6 +104,41 @@ class WhatsAppClient:
             logger.error("Failed to request pairing code: %s", exc)
             return None
 
+    async def connect(self) -> bool:
+        """Request the bridge to start Baileys and begin pairing.
+
+        Returns:
+            True if the connect request was accepted, False on error.
+        """
+        client = await self._get_client()
+        try:
+            response = await client.post("/connect")
+            if response.status_code in (200, 409):
+                return True
+            logger.error("Connect failed: %s (status %d)", response.text, response.status_code)
+            return False
+        except httpx.HTTPError as exc:
+            logger.error("Failed to connect: %s", exc)
+            return False
+
+    async def logout(self) -> bool:
+        """Logout from WhatsApp and clear auth state so a new number can be linked.
+
+        Returns:
+            True if logout succeeded, False on error.
+        """
+        client = await self._get_client()
+        try:
+            response = await client.post("/logout")
+            if response.status_code == 200:
+                logger.info("WhatsApp logged out successfully")
+                return True
+            logger.error("Logout failed: %s (status %d)", response.text, response.status_code)
+            return False
+        except httpx.HTTPError as exc:
+            logger.error("Failed to logout: %s", exc)
+            return False
+
     async def send_message(
         self,
         number: str,
