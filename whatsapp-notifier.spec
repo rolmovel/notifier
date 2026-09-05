@@ -19,10 +19,6 @@ a = Analysis(
     datas=[
         # Include the bridge directory (JS source + package.json)
         ('bridge', 'bridge'),
-        # Include notification templates if they exist
-        ('config', 'config'),
-        # Include assets (icon, etc.) if they exist
-        ('assets', 'assets'),
     ],
     hiddenimports=[
         'src',

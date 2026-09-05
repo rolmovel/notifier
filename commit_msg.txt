@@ -1,1 +1,1 @@
-chore: restrict CI build to Windows only + add status button in main window
+fix: remove non-existent assets/config dirs from PyInstaller spec
