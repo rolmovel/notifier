@@ -110,18 +110,24 @@ jobs:
           "@ | Out-File -Encoding utf8 "$distDir\README.txt"
 
       - name: Set up Inno Setup
-        uses: llvm-vs/setup-iscc@v1
-        with:
-          version: "6.4.0"
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            throw "Inno Setup compiler not found at $iscc"
+          }
+          Write-Host "Inno Setup installed at $iscc"
 
       - name: Build installer
         shell: pwsh
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
           $ver = $env:VERSION
           Write-Host "Building installer for version $ver"
-          iscc /DVERSION=$ver installer\whatsapp-notifier.iss
+          & $iscc /DVERSION=$ver installer\whatsapp-notifier.iss
           $installerPath = "installer\Output\WhatsAppNotifier-Setup-$ver.exe"
           if (-not (Test-Path $installerPath)) {
             throw "Installer not found at $installerPath"
