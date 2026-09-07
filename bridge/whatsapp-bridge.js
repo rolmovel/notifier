@@ -14,17 +14,22 @@
  * This is required because Program Files is read-only for non-admin users.
  */
 
-const express = require('express');
-const {
-    default: makeWASocket,
+import express from 'express';
+import {
+    default as makeWASocket,
     useMultiFileAuthState,
     DisconnectReason,
     fetchLatestBaileysVersion,
     Browsers,
-} = require('@whiskeysockets/baileys');
-const { Boom } = require('@hapi/boom');
-const path = require('path');
-const fs = require('fs');
+} from '@whiskeysockets/baileys';
+import { Boom } from '@hapi/boom';
+import path from 'node:path';
+import fs from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import pino from 'pino';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 // Parse CLI args
 const args = process.argv.slice(2);
@@ -154,7 +159,7 @@ async function startBaileys() {
             markOnlineOnConnect: false,
             qrTimeout: 120000,
             syncFullHistory: false,
-            logger: require('pino')({ level: 'warn' }),
+            logger: pino({ level: 'warn' }),
         });
 
         sock.ev.on('creds.update', saveCreds);

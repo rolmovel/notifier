@@ -2,11 +2,13 @@
   "name": "whatsapp-bridge",
   "version": "1.0.0",
   "description": "Baileys WhatsApp bridge for desktop utility",
+  "type": "module",
   "main": "whatsapp-bridge.js",
   "scripts": {
     "start": "node whatsapp-bridge.js"
   },
   "dependencies": {
+    "@hapi/boom": "^9.1.4",
     "@whiskeysockets/baileys": "^6.7.0",
     "express": "^4.19.0",
     "pino": "^9.1.0",
