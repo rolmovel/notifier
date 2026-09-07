@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
+from pathlib import Path
 
 import httpx
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QDialog,
+    QFileDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -29,8 +31,9 @@ from src.ui.qr_dialog import QrDialog
 
 from src.models.appointment import Appointment
 from src.models.settings import Settings
+from src.services.excel_reader import ExcelReadError, read_excel, read_excel_headers
 from src.services.settings_store import SettingsStore
-from src.services.template_renderer import render_template, get_available_variables
+from src.services.template_renderer import render_template
 
 logger = logging.getLogger(__name__)
 
@@ -40,10 +43,11 @@ class SettingsDialog(QDialog):
 
     Features:
     - Message template editor with monospace font
-    - Variable reference panel showing available {{variables}}
+    - Variable reference panel showing the Excel file's headers as {{placeholders}}
+    - "Seleccionar Excel" button when no file is loaded yet
     - Default country code input
     - Bridge port input
-    - Live preview of rendered message with sample data
+    - Live preview of rendered message with sample data from the file
     - Save/Cancel buttons
     """
 
@@ -52,6 +56,8 @@ class SettingsDialog(QDialog):
         settings: Settings,
         store: SettingsStore | None = None,
         bridge_url: str = "http://127.0.0.1:3001",
+        excel_headers: list[str] | None = None,
+        sample_raw_data: dict[str, str] | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -59,8 +65,12 @@ class SettingsDialog(QDialog):
         self._store = store
         self._bridge_url = bridge_url
         self._whatsapp_client = WhatsAppClient(bridge_url)
+        # Excel-derived state (may be refreshed from within the dialog)
+        self._excel_headers: list[str] = list(excel_headers) if excel_headers else []
+        self._sample_raw_data: dict[str, str] = dict(sample_raw_data) if sample_raw_data else {}
         self._setup_ui()
         self._load_settings()
+        self._refresh_variables_panel()
         self._refresh_connection_status()
 
         # Auto-refresh connection status every 3 seconds
@@ -96,21 +106,35 @@ class SettingsDialog(QDialog):
         self._template_edit.setPlaceholderText("Escribe la plantilla del mensaje...")
         template_layout.addWidget(self._template_edit, stretch=3)
 
-        # Variables panel
+        # Variables panel — populated dynamically from the Excel headers
         vars_widget = QWidget()
         vars_layout = QVBoxLayout(vars_widget)
         vars_layout.setContentsMargins(0, 0, 0, 0)
 
-        vars_label = QLabel("Variables disponibles:")
+        vars_label = QLabel("Variables disponibles (cabeceras del Excel):")
         vars_label.setStyleSheet("font-weight: bold;")
+        vars_label.setWordWrap(True)
         vars_layout.addWidget(vars_label)
 
-        for var in get_available_variables():
-            var_label = QLabel(f"{{{{{var}}}}}")
-            var_label.setStyleSheet(
-                "font-family: monospace; color: #0066cc; padding: 2px;"
-            )
-            vars_layout.addWidget(var_label)
+        # Container that holds either the variable list or the "no file" notice.
+        self._vars_list_container = QWidget()
+        self._vars_list_layout = QVBoxLayout(self._vars_list_container)
+        self._vars_list_layout.setContentsMargins(0, 0, 0, 0)
+        vars_layout.addWidget(self._vars_list_container)
+
+        # "Seleccionar Excel" button — always visible so a file can be (re)chosen
+        self._select_excel_btn = QPushButton("📂 Seleccionar Excel")
+        self._select_excel_btn.clicked.connect(self._on_select_excel)
+        vars_layout.addWidget(self._select_excel_btn)
+
+        # Hint about how placeholders work
+        hint_label = QLabel(
+            "Usa {{cabecera}} para insertar el valor de cada columna.\n"
+            "Las cabeceras se obtienen del archivo Excel seleccionado."
+        )
+        hint_label.setStyleSheet("color: #666; font-size: 11px;")
+        hint_label.setWordWrap(True)
+        vars_layout.addWidget(hint_label)
 
         vars_layout.addStretch()
         template_layout.addWidget(vars_widget, stretch=1)
@@ -333,23 +357,121 @@ class SettingsDialog(QDialog):
             QMessageBox.warning(self, "Error", "No se pudo desconectar WhatsApp.")
 
     def _on_preview(self) -> None:
-        """Generate a preview of the rendered message with sample data."""
-        template = self._template_edit.toPlainText()
+        """Generate a preview of the rendered message with sample data.
 
-        # Create a sample appointment
+        Uses the first data row of the selected Excel file as the sample. If no
+        file is loaded, the user is prompted to select one.
+        """
+        if not self._sample_raw_data:
+            QMessageBox.information(
+                self,
+                "Vista previa no disponible",
+                "Selecciona un archivo Excel para generar la vista previa.\n\n"
+                "Usa el botón '📂 Seleccionar Excel' en el panel de variables.",
+            )
+            return
+
+        template = self._template_edit.toPlainText()
         sample = Appointment(
             row_number=1,
-            start_time=datetime(2026, 7, 15, 10, 30),
-            duration_minutes=30,
-            gabinete="Sala 3",
-            patient_name="Juan García",
-            appointment_type="Limpieza dental",
-            phone_mobile="612345678",
+            start_time=datetime(1900, 1, 1),
+            duration_minutes=1,
+            patient_name=self._sample_raw_data.get("Paciente", "Paciente")
+            or "Paciente",
+            appointment_type=self._sample_raw_data.get("Tipo de cita", "Cita")
+            or "Cita",
             country_code=self._country_code_input.text() or "+34",
+            raw_data=self._sample_raw_data,
         )
 
         rendered = render_template(template, sample)
         self._preview_label.setPlainText(rendered)
+
+    def _refresh_variables_panel(self) -> None:
+        """Rebuild the variables list from the currently loaded Excel headers."""
+        # Clear previous content
+        while self._vars_list_layout.count():
+            item = self._vars_list_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+        if self._excel_headers:
+            for header in self._excel_headers:
+                if not header or not header.strip():
+                    continue
+                var_label = QLabel(f"{{{{{header}}}}}")
+                var_label.setStyleSheet(
+                    "font-family: monospace; color: #0066cc; padding: 2px;"
+                )
+                var_label.setToolTip(f"Inserta el valor de la columna '{header}'")
+                self._vars_list_layout.addWidget(var_label)
+            self._vars_list_layout.addStretch()
+        else:
+            notice = QLabel(
+                "⚠ No hay ningún archivo Excel seleccionado.\n"
+                "Pulsa el botón inferior para seleccionarlo y ver las cabeceras "
+                "disponibles como placeholders."
+            )
+            notice.setStyleSheet("color: #b8860b; padding: 6px;")
+            notice.setWordWrap(True)
+            self._vars_list_layout.addWidget(notice)
+            self._vars_list_layout.addStretch()
+
+    def _on_select_excel(self) -> None:
+        """Open a file dialog to choose an Excel file and load its headers."""
+        start_dir = ""
+        if self._settings.last_file_path:
+            start_dir = str(Path(self._settings.last_file_path).parent)
+
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Seleccionar archivo Excel",
+            start_dir,
+            "Excel files (*.xlsx)",
+        )
+
+        if not file_path:
+            return
+
+        try:
+            headers = read_excel_headers(file_path)
+        except ExcelReadError as exc:
+            QMessageBox.critical(self, "Error al leer Excel", str(exc))
+            return
+
+        # Read the first data row to use as a preview sample
+        sample_raw: dict[str, str] = {}
+        try:
+            appointments = read_excel(file_path, self._settings.default_country_code)
+            if appointments:
+                sample_raw = dict(appointments[0].raw_data)
+        except ExcelReadError as exc:
+            QMessageBox.warning(
+                self,
+                "Aviso",
+                f"Se leyeron las cabeceras pero el archivo tiene problemas:\n{exc}",
+            )
+
+        self._excel_headers = headers
+        self._sample_raw_data = sample_raw
+        self._settings.last_file_path = file_path
+        self._refresh_variables_panel()
+        self._status_bar_hint(f"Excel cargado: {Path(file_path).name}")
+
+    def _status_bar_hint(self, message: str) -> None:
+        """Show a transient hint message (best-effort, no status bar in dialog)."""
+        logger.info(message)
+
+    @property
+    def excel_headers(self) -> list[str]:
+        """Headers of the Excel file currently loaded in the dialog."""
+        return list(self._excel_headers)
+
+    @property
+    def sample_raw_data(self) -> dict[str, str]:
+        """First data row (header -> value) of the loaded Excel file."""
+        return dict(self._sample_raw_data)
 
     def _on_save(self) -> None:
         """Save the settings."""

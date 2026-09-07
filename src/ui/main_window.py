@@ -57,6 +57,9 @@ class MainWindow(QMainWindow):
         self._appointments: list[Appointment] = []
         self._send_worker: SendWorker | None = None
         self._results: list[SendResult] = []
+        # Excel-derived state shared with the settings dialog
+        self._excel_headers: list[str] = []
+        self._sample_raw_data: dict[str, str] = {}
 
         self._setup_ui()
         self._update_status_bar()
@@ -260,8 +263,30 @@ class MainWindow(QMainWindow):
 
     def _on_open_settings(self) -> None:
         """Open the settings dialog."""
-        dialog = SettingsDialog(self._settings, self._settings_store, self._bridge_url, self)
+        dialog = SettingsDialog(
+            self._settings,
+            self._settings_store,
+            self._bridge_url,
+            excel_headers=self._excel_headers,
+            sample_raw_data=self._sample_raw_data,
+            parent=self,
+        )
         if dialog.exec() == SettingsDialog.DialogCode.Accepted:
+            # Pick up any Excel file selected from within the dialog
+            self._excel_headers = dialog.excel_headers
+            self._sample_raw_data = dialog.sample_raw_data
+            if self._settings.last_file_path and not self._appointments:
+                # Reload appointments if a file was chosen for the first time
+                try:
+                    self._appointments = read_excel(
+                        self._settings.last_file_path,
+                        self._settings.default_country_code,
+                    )
+                    self._file_label.setText(Path(self._settings.last_file_path).name)
+                    self._populate_preview(self._appointments)
+                    self._send_btn.setEnabled(len(self._appointments) > 0)
+                except ExcelReadError as exc:
+                    QMessageBox.critical(self, "Error al leer Excel", str(exc))
             self._status_bar.showMessage("Configuración guardada", 3000)
 
     def _on_select_file(self) -> None:
@@ -285,6 +310,13 @@ class MainWindow(QMainWindow):
             self._appointments = appointments
             self._settings.last_file_path = file_path
             self._file_label.setText(Path(file_path).name)
+            # Cache headers + first row sample for the settings dialog
+            from src.services.excel_reader import read_excel_headers
+            try:
+                self._excel_headers = read_excel_headers(file_path)
+            except ExcelReadError:
+                self._excel_headers = []
+            self._sample_raw_data = dict(appointments[0].raw_data) if appointments else {}
             self._populate_preview(appointments)
             self._send_btn.setEnabled(len(appointments) > 0)
             self._status_bar.showMessage(

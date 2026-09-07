@@ -11,8 +11,11 @@ import sys
 from pathlib import Path
 
 import httpx
+from platformdirs import user_config_dir
 
 logger = logging.getLogger(__name__)
+
+APP_NAME = "whatsapp-notifier"
 
 
 def _get_bridge_dir() -> Path:
@@ -25,6 +28,38 @@ def _get_bridge_dir() -> Path:
         return Path(sys._MEIPASS) / "bridge"
     # Development mode
     return Path(__file__).parent.parent.parent / "bridge"
+
+
+def _resolve_node_executable() -> str:
+    """Resolve the Node.js executable to use.
+
+    Order of preference:
+      1. <exe_dir>/node/node.exe (bundled portable Node, PyInstaller mode)
+      2. <bridge_dir>/node/node.exe (alternative bundled location)
+      3. 'node' from PATH (dev mode, or user-installed Node)
+    """
+    bridge_dir = _get_bridge_dir()
+    candidates: list[Path] = []
+    if getattr(sys, "frozen", False) or hasattr(sys, "_MEIPASS"):
+        exe_dir = Path(sys.executable).parent
+        candidates.append(exe_dir / "node" / "node.exe")
+        candidates.append(exe_dir / "node" / "node")
+    candidates.append(bridge_dir.parent / "node" / "node.exe")
+    candidates.append(bridge_dir.parent / "node" / "node")
+    for cand in candidates:
+        if cand.is_file():
+            return str(cand)
+    # Fallback: rely on PATH lookup
+    return "node"
+
+
+def _get_auth_dir() -> Path:
+    """Return the user-writable auth directory for the WhatsApp bridge.
+
+    Matches the path used by settings_store (platformdirs user_config_dir)
+    so all per-user state lives under the same app folder.
+    """
+    return Path(user_config_dir(APP_NAME)) / "bridge-auth"
 
 
 # Path to the bridge script
@@ -92,15 +127,26 @@ class BridgeManager:
                 return False
 
             try:
+                node_exe = _resolve_node_executable()
+                auth_dir = _get_auth_dir()
+                auth_dir.mkdir(parents=True, exist_ok=True)
+
+                env = os.environ.copy()
+                env["WHATSAPP_AUTH_DIR"] = str(auth_dir)
+
                 self._process = subprocess.Popen(
-                    ["node", str(BRIDGE_SCRIPT), "--port", str(self._port)],
+                    [node_exe, str(BRIDGE_SCRIPT), "--port", str(self._port)],
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                     cwd=str(BRIDGE_SCRIPT.parent),
+                    env=env,
                     # Create a new process group so we can kill the whole tree
                     start_new_session=True,
                 )
-                logger.info("Bridge subprocess started (PID: %d)", self._process.pid)
+                logger.info(
+                    "Bridge subprocess started (PID: %d, node: %s, auth: %s)",
+                    self._process.pid, node_exe, auth_dir,
+                )
             except FileNotFoundError:
                 logger.error("Node.js not found. Please install Node.js 18+.")
                 return False

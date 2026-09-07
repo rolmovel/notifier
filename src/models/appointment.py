@@ -27,6 +27,9 @@ class Appointment(BaseModel):
     phone_mobile: Optional[str] = None
     # The country code used for normalization (injected by reader)
     country_code: str = "+34"
+    # Raw row data mapping original Excel header -> string cell value.
+    # Used by the template renderer to resolve {{header}} placeholders.
+    raw_data: dict[str, str] = Field(default_factory=dict)
 
     @computed_field  # type: ignore[misc]
     @property

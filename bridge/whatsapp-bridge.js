@@ -7,7 +7,11 @@
  *   POST /pair    — request pairing code (phone number)
  *   POST /send    — send a text message
  *
- * Auth state is persisted to ./auth/ (relative to bridge/ directory).
+ * Auth state is persisted to a user-writable directory:
+ *   - $WHATSAPP_AUTH_DIR if set (passed by the Python host)
+ *   - otherwise %APPDATA%\whatsapp-notifier\bridge-auth (Windows)
+ *             or ~/.config/whatsapp-notifier/bridge-auth (POSIX)
+ * This is required because Program Files is read-only for non-admin users.
  */
 
 const express = require('express');
@@ -42,7 +46,27 @@ let connectionPhone = null;
 let isStarting = false;
 let shouldReconnect = false;
 
-const authDir = path.join(__dirname, 'auth');
+function resolveAuthDir() {
+    if (process.env.WHATSAPP_AUTH_DIR) {
+        return process.env.WHATSAPP_AUTH_DIR;
+    }
+    const appName = 'whatsapp-notifier';
+    const subdir = 'bridge-auth';
+    if (process.platform === 'win32' && process.env.APPDATA) {
+        return path.join(process.env.APPDATA, appName, subdir);
+    }
+    if (process.platform === 'darwin' && process.env.HOME) {
+        return path.join(process.env.HOME, 'Library', 'Application Support', appName, subdir);
+    }
+    const xdg = process.env.XDG_CONFIG_HOME || (process.env.HOME && path.join(process.env.HOME, '.config'));
+    if (xdg) {
+        return path.join(xdg, appName, subdir);
+    }
+    // Fallback: relative to bridge dir (dev mode only)
+    return path.join(__dirname, 'auth');
+}
+
+const authDir = resolveAuthDir();
 if (!fs.existsSync(authDir)) {
     fs.mkdirSync(authDir, { recursive: true });
 }

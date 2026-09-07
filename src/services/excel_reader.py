@@ -106,6 +106,53 @@ def _parse_duration(value: Any) -> int | None:
         return None
 
 
+def read_excel_headers(file_path: str | Path) -> list[str]:
+    """Read only the header row (row 1) of an Excel file.
+
+    Args:
+        file_path: Path to the .xlsx file.
+
+    Returns:
+        List of header strings as they appear in the file (empty strings for
+        blank header cells).
+
+    Raises:
+        ExcelReadError: If the file cannot be read or has no header row.
+    """
+    path = Path(file_path)
+
+    if not path.exists():
+        raise ExcelReadError(f"No se pudo abrir el archivo: {path}")
+
+    if path.suffix.lower() != ".xlsx":
+        raise ExcelReadError("El archivo no es un Excel válido (.xlsx)")
+
+    try:
+        wb = load_workbook(path, read_only=True, data_only=True)
+    except Exception as exc:
+        raise ExcelReadError(f"No se pudo abrir el archivo: {path}") from exc
+
+    ws = wb.active
+    rows = list(ws.iter_rows(values_only=True))
+    wb.close()
+
+    if not rows:
+        raise ExcelReadError("El archivo no contiene filas")
+
+    return [str(h) if h is not None else "" for h in rows[0]]
+
+
+def _row_to_raw_data(headers: list[str], row: tuple) -> dict[str, str]:
+    """Build a mapping of original header name -> string cell value for a row."""
+    raw: dict[str, str] = {}
+    for idx, header in enumerate(headers):
+        if not header:
+            continue
+        value = row[idx] if idx < len(row) else None
+        raw[header] = _parse_cell_as_str(value)
+    return raw
+
+
 def read_excel(
     file_path: str | Path,
     default_country_code: str = "+34",
@@ -176,6 +223,9 @@ def read_excel(
         start_time = _parse_start_time(get_cell("start_time"))
         duration = _parse_duration(get_cell("duration"))
 
+        # Raw header -> value mapping for template placeholders
+        raw_data = _row_to_raw_data(headers, row)
+
         # Build appointment — validation happens in the model
         try:
             appointment = Appointment(
@@ -188,6 +238,7 @@ def read_excel(
                 phone_landline=phone_landline,
                 phone_mobile=phone_mobile,
                 country_code=default_country_code,
+                raw_data=raw_data,
             )
             appointments.append(appointment)
         except Exception as exc:
@@ -202,6 +253,7 @@ def read_excel(
                 phone_landline=phone_landline,
                 phone_mobile=phone_mobile,
                 country_code=default_country_code,
+                raw_data=raw_data,
             )
             appointments.append(appointment)
 
