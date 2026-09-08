@@ -309,6 +309,9 @@ class MainWindow(QMainWindow):
                     self._apply_filters()
                 except ExcelReadError as exc:
                     QMessageBox.critical(self, "Error al leer Excel", str(exc))
+            # The phone header may have changed inside the dialog; refresh the
+            # send-button state accordingly.
+            self._update_selection_count()
             self._status_bar.showMessage("Configuración guardada", 3000)
 
     def _on_select_file(self) -> None:
@@ -431,7 +434,9 @@ class MainWindow(QMainWindow):
             self._selection_count_label.setText(f"{selected} / {total} seleccionados")
         else:
             self._selection_count_label.setText("")
-        self._send_btn.setEnabled(selected > 0)
+        self._send_btn.setEnabled(
+            selected > 0 and bool(self._settings.phone_header.strip())
+        )
 
     def _get_selected_appointments(self) -> list[Appointment]:
         """Return the filtered appointments whose checkbox is checked."""
@@ -455,6 +460,16 @@ class MainWindow(QMainWindow):
 
     def _on_send(self) -> None:
         """Start sending WhatsApp messages."""
+        if not self._settings.phone_header.strip():
+            QMessageBox.warning(
+                self,
+                "Teléfono no configurado",
+                "No se ha seleccionado la columna de teléfono.\n\n"
+                "Abre ⚙ Configuración → Mensajes y marca qué cabecera "
+                "contiene el número de destino antes de enviar.",
+            )
+            return
+
         selected = self._get_selected_appointments()
         if not selected:
             return

@@ -9,6 +9,7 @@ import httpx
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QComboBox,
     QDialog,
     QFileDialog,
@@ -19,6 +20,8 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPlainTextEdit,
+    QRadioButton,
+    QScrollArea,
     QSpinBox,
     QTabWidget,
     QPushButton,
@@ -68,6 +71,10 @@ class SettingsDialog(QDialog):
         # Excel-derived state (may be refreshed from within the dialog)
         self._excel_headers: list[str] = list(excel_headers) if excel_headers else []
         self._sample_raw_data: dict[str, str] = dict(sample_raw_data) if sample_raw_data else {}
+        # Radio-button group for the phone-header selector (single selection).
+        self._phone_header_group: QButtonGroup = QButtonGroup(self)
+        self._phone_header_group.setExclusive(True)
+        self._phone_header_radios: dict[str, QRadioButton] = {}
         self._setup_ui()
         self._load_settings()
         self._refresh_variables_panel()
@@ -115,6 +122,36 @@ class SettingsDialog(QDialog):
         vars_label.setStyleSheet("font-weight: bold;")
         vars_label.setWordWrap(True)
         vars_layout.addWidget(vars_label)
+
+        # --- Phone header selector (single-selection radio buttons) ---
+        phone_group_box = QGroupBox("Columna de teléfono (destinatario)")
+        phone_group_box.setToolTip(
+            "Selecciona la columna del Excel que contiene el número de teléfono "
+            "al que se enviará el mensaje. Es obligatorio para poder enviar."
+        )
+        phone_group_layout = QVBoxLayout(phone_group_box)
+        phone_group_layout.setContentsMargins(6, 6, 6, 6)
+
+        phone_hint = QLabel(
+            "Marca qué cabecera contiene el teléfono de destino. "
+            "Sin esta selección no se podrán enviar los WhatsApp."
+        )
+        phone_hint.setStyleSheet("color: #666; font-size: 11px;")
+        phone_hint.setWordWrap(True)
+        phone_group_layout.addWidget(phone_hint)
+
+        # Scrollable area holding the radio buttons (rebuilt per Excel file).
+        self._phone_radio_scroll = QScrollArea()
+        self._phone_radio_scroll.setWidgetResizable(True)
+        self._phone_radio_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        self._phone_radio_container = QWidget()
+        self._phone_radio_layout = QVBoxLayout(self._phone_radio_container)
+        self._phone_radio_layout.setContentsMargins(0, 0, 0, 0)
+        self._phone_radio_layout.setSpacing(2)
+        self._phone_radio_scroll.setWidget(self._phone_radio_container)
+        phone_group_layout.addWidget(self._phone_radio_scroll)
+
+        vars_layout.addWidget(phone_group_box)
 
         # Container that holds either the variable list or the "no file" notice.
         self._vars_list_container = QWidget()
@@ -222,17 +259,6 @@ class SettingsDialog(QDialog):
         self._country_code_input.setMaxLength(5)
         form.addRow("Código de país:", self._country_code_input)
 
-        # Mapping: which Excel header holds the destination phone number.
-        self._phone_header_combo = QComboBox()
-        self._phone_header_combo.setToolTip(
-            "Selecciona la columna del Excel que contiene el número de teléfono "
-            "al que se enviará el mensaje."
-        )
-        self._phone_header_combo.currentTextChanged.connect(
-            self._on_phone_header_changed
-        )
-        form.addRow("Columna de teléfono:", self._phone_header_combo)
-
         self._port_input = QSpinBox()
         self._port_input.setRange(1024, 65535)
         self._port_input.setValue(3001)
@@ -288,26 +314,73 @@ class SettingsDialog(QDialog):
             self._conn_disconnect_btn.setEnabled(False)
 
     def _refresh_phone_header_combo(self) -> None:
-        """Repopulate the phone-header combo from the loaded Excel headers."""
-        self._phone_header_combo.blockSignals(True)
-        self._phone_header_combo.clear()
-        self._phone_header_combo.addItem("(no mapeado)")
-        for header in self._excel_headers:
-            if header and header.strip():
-                self._phone_header_combo.addItem(header)
-        # Restore the previously saved selection if present.
+        """Rebuild the phone-header radio buttons from the loaded Excel headers.
+
+        A leading "(no mapeado)" option is always present so the user can
+        explicitly clear the selection.
+        """
+        # Clear previous radios.
+        for radio in list(self._phone_header_radios.values()):
+            self._phone_header_group.removeButton(radio)
+            radio.deleteLater()
+        self._phone_header_radios.clear()
+
+        # Clear the radio layout.
+        while self._phone_radio_layout.count():
+            item = self._phone_radio_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+        # "(no mapeado)" option.
+        none_radio = QRadioButton("(no mapeado)")
+        none_radio.setToolTip("Ninguna columna seleccionada como teléfono.")
+        self._phone_header_group.addButton(none_radio)
+        self._phone_radio_layout.addWidget(none_radio)
+        self._phone_header_radios[""] = none_radio
+
         saved = (self._settings.phone_header or "").strip()
-        idx = 0
-        if saved:
-            for i in range(self._phone_header_combo.count()):
-                if self._phone_header_combo.itemText(i) == saved:
-                    idx = i
-                    break
-        self._phone_header_combo.setCurrentIndex(idx)
-        self._phone_header_combo.blockSignals(False)
+        selected_key = ""
+
+        for header in self._excel_headers:
+            if not header or not header.strip():
+                continue
+            radio = QRadioButton(header)
+            radio.setToolTip(
+                f"Usa la columna '{header}' como número de teléfono de destino."
+            )
+            self._phone_header_group.addButton(radio)
+            self._phone_radio_layout.addWidget(radio)
+            self._phone_header_radios[header] = radio
+            if header == saved:
+                selected_key = header
+
+        self._phone_radio_layout.addStretch()
+
+        # Restore the saved selection (or "(no mapeado)" if none).
+        radio = self._phone_header_radios.get(selected_key) or none_radio
+        radio.setChecked(True)
+
+        # React to changes.
+        self._phone_header_group.idToggled.connect(self._on_phone_radio_toggled)
+
+    def _on_phone_radio_toggled(self, _button_id: int, checked: bool) -> None:
+        """Persist the selected phone header into the in-memory settings."""
+        if not checked:
+            return
+        checked_btn = self._phone_header_group.checkedButton()
+        if checked_btn is None:
+            self._settings.phone_header = ""
+            return
+        # Find the header whose radio is checked (empty string == "(no mapeado)").
+        for header, radio in self._phone_header_radios.items():
+            if radio is checked_btn:
+                self._settings.phone_header = header
+                return
+        self._settings.phone_header = ""
 
     def _on_phone_header_changed(self, text: str) -> None:
-        """Persist the selected phone header into the in-memory settings."""
+        """Backwards-compatible hook (no longer wired to a combo)."""
         self._settings.phone_header = "" if text == "(no mapeado)" else text
 
     def _on_connect_whatsapp(self) -> None:
