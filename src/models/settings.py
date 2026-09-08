@@ -21,3 +21,6 @@ class Settings(BaseModel):
     default_country_code: str = Field(default="+34")
     message_template: str = Field(default=DEFAULT_MESSAGE_TEMPLATE)
     last_file_path: str | None = Field(default=None)
+    # Name of the Excel header (as it appears in the file) that holds the
+    # destination phone number. Configured by the user in Settings.
+    phone_header: str = Field(default="")

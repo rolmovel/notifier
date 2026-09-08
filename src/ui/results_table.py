@@ -1,4 +1,9 @@
-"""Results table widget — displays send results in a QTableWidget."""
+"""Results table widget — displays send results in a QTableWidget.
+
+The data columns are taken dynamically from the Excel headers stored in each
+appointment's ``raw_data``. Two fixed columns are appended: the send status
+and the error reason (if any).
+"""
 
 from __future__ import annotations
 
@@ -15,22 +20,17 @@ from src.models.send_result import SendResult, SendStatus
 class ResultsTable(QTableWidget):
     """Table widget showing send results with real-time updates."""
 
-    HEADERS = [
-        "Paciente",
-        "Teléfono",
-        "Fecha Cita",
-        "Hora Cita",
-        "Estado",
-        "Error",
-    ]
+    # Fixed trailing columns (after the dynamic Excel columns).
+    STATUS_COLUMN_LABEL = "Estado"
+    ERROR_COLUMN_LABEL = "Error"
 
     def __init__(self, parent=None) -> None:
-        super().__init__(0, len(self.HEADERS), parent)
+        super().__init__(0, 0, parent)
+        self._data_headers: list[str] = []
         self._setup_ui()
 
     def _setup_ui(self) -> None:
         """Initialize the table UI."""
-        self.setHorizontalHeaderLabels(self.HEADERS)
         self.setAlternatingRowColors(True)
         self.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
@@ -40,35 +40,46 @@ class ResultsTable(QTableWidget):
         header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         header.setStretchLastSection(True)
 
+    @property
+    def status_column(self) -> int:
+        """Index of the status column, or -1 if not configured yet."""
+        n = self.columnCount()
+        return n - 2 if n >= 2 else -1
+
+    def _ensure_columns(self, data_headers: list[str]) -> None:
+        """Set up the column headers (dynamic + fixed) if they changed."""
+        if data_headers == self._data_headers and self.columnCount() > 0:
+            return
+        self._data_headers = list(data_headers)
+        labels = list(data_headers) + [self.STATUS_COLUMN_LABEL, self.ERROR_COLUMN_LABEL]
+        self.setColumnCount(len(labels))
+        self.setHorizontalHeaderLabels(labels)
+
     def clear_results(self) -> None:
         """Remove all rows from the table."""
         self.setRowCount(0)
 
     def add_result(self, result: SendResult) -> None:
         """Add a single send result to the table."""
+        appointment = result.appointment
+        data_headers = list(appointment.raw_data.keys())
+        self._ensure_columns(data_headers)
+
         row = self.rowCount()
         self.insertRow(row)
-
-        appointment = result.appointment
-        date_str = appointment.start_time.strftime("%Y-%m-%d")
-        time_str = appointment.start_time.strftime("%H:%M")
 
         status_text = "✅ Enviado" if result.status == SendStatus.SENT else "❌ Fallido"
         error_text = result.error_reason or ""
 
-        cells = [
-            appointment.patient_name,
-            result.phone_used,
-            date_str,
-            time_str,
-            status_text,
-            error_text,
-        ]
+        cells = [appointment.get(h) for h in data_headers]
+        cells.append(status_text)
+        cells.append(error_text)
 
+        status_col = len(data_headers)  # status column index
         for col, text in enumerate(cells):
             item = QTableWidgetItem(text)
             item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-            if col == 4:  # Status column
+            if col == status_col:
                 if result.status == SendStatus.SENT:
                     item.setForeground(Qt.GlobalColor.darkGreen)
                 else:
@@ -87,8 +98,11 @@ class ResultsTable(QTableWidget):
         """Return a summary of current results."""
         sent = 0
         failed = 0
+        status_col = self.status_column
         for row in range(self.rowCount()):
-            status_item = self.item(row, 4)
+            if status_col < 0:
+                continue
+            status_item = self.item(row, status_col)
             if status_item:
                 if "Enviado" in status_item.text():
                     sent += 1

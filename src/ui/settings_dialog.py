@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
 from pathlib import Path
 
 import httpx
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
+    QComboBox,
     QDialog,
     QFileDialog,
     QFormLayout,
@@ -222,6 +222,17 @@ class SettingsDialog(QDialog):
         self._country_code_input.setMaxLength(5)
         form.addRow("Código de país:", self._country_code_input)
 
+        # Mapping: which Excel header holds the destination phone number.
+        self._phone_header_combo = QComboBox()
+        self._phone_header_combo.setToolTip(
+            "Selecciona la columna del Excel que contiene el número de teléfono "
+            "al que se enviará el mensaje."
+        )
+        self._phone_header_combo.currentTextChanged.connect(
+            self._on_phone_header_changed
+        )
+        form.addRow("Columna de teléfono:", self._phone_header_combo)
+
         self._port_input = QSpinBox()
         self._port_input.setRange(1024, 65535)
         self._port_input.setValue(3001)
@@ -251,6 +262,7 @@ class SettingsDialog(QDialog):
         self._template_edit.setPlainText(self._settings.message_template)
         self._country_code_input.setText(self._settings.default_country_code)
         self._port_input.setValue(self._settings.bridge_port)
+        self._refresh_phone_header_combo()
 
     def _refresh_connection_status(self) -> None:
         """Check and display the current WhatsApp connection status."""
@@ -274,6 +286,29 @@ class SettingsDialog(QDialog):
             self._conn_status_label.setText("🔴 Desconectado")
             self._conn_connect_btn.setEnabled(True)
             self._conn_disconnect_btn.setEnabled(False)
+
+    def _refresh_phone_header_combo(self) -> None:
+        """Repopulate the phone-header combo from the loaded Excel headers."""
+        self._phone_header_combo.blockSignals(True)
+        self._phone_header_combo.clear()
+        self._phone_header_combo.addItem("(no mapeado)")
+        for header in self._excel_headers:
+            if header and header.strip():
+                self._phone_header_combo.addItem(header)
+        # Restore the previously saved selection if present.
+        saved = (self._settings.phone_header or "").strip()
+        idx = 0
+        if saved:
+            for i in range(self._phone_header_combo.count()):
+                if self._phone_header_combo.itemText(i) == saved:
+                    idx = i
+                    break
+        self._phone_header_combo.setCurrentIndex(idx)
+        self._phone_header_combo.blockSignals(False)
+
+    def _on_phone_header_changed(self, text: str) -> None:
+        """Persist the selected phone header into the in-memory settings."""
+        self._settings.phone_header = "" if text == "(no mapeado)" else text
 
     def _on_connect_whatsapp(self) -> None:
         """Open the QR dialog to connect or re-link WhatsApp."""
@@ -374,14 +409,9 @@ class SettingsDialog(QDialog):
         template = self._template_edit.toPlainText()
         sample = Appointment(
             row_number=1,
-            start_time=datetime(1900, 1, 1),
-            duration_minutes=1,
-            patient_name=self._sample_raw_data.get("Paciente", "Paciente")
-            or "Paciente",
-            appointment_type=self._sample_raw_data.get("Tipo de cita", "Cita")
-            or "Cita",
-            country_code=self._country_code_input.text() or "+34",
             raw_data=self._sample_raw_data,
+            phone_header=self._settings.phone_header,
+            country_code=self._country_code_input.text() or "+34",
         )
 
         rendered = render_template(template, sample)
@@ -443,7 +473,11 @@ class SettingsDialog(QDialog):
         # Read the first data row to use as a preview sample
         sample_raw: dict[str, str] = {}
         try:
-            appointments = read_excel(file_path, self._settings.default_country_code)
+            appointments = read_excel(
+                file_path,
+                phone_header=self._settings.phone_header,
+                default_country_code=self._settings.default_country_code,
+            )
             if appointments:
                 sample_raw = dict(appointments[0].raw_data)
         except ExcelReadError as exc:
@@ -457,6 +491,7 @@ class SettingsDialog(QDialog):
         self._sample_raw_data = sample_raw
         self._settings.last_file_path = file_path
         self._refresh_variables_panel()
+        self._refresh_phone_header_combo()
         self._status_bar_hint(f"Excel cargado: {Path(file_path).name}")
 
     def _status_bar_hint(self, message: str) -> None:

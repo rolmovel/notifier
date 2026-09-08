@@ -7,8 +7,10 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
+    QCheckBox,
     QFileDialog,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QMainWindow,
     QMessageBox,
@@ -31,6 +33,8 @@ from src.services.send_worker import SendWorker
 from src.services.settings_store import SettingsStore
 from src.services.whatsapp_client import WhatsAppClient
 from src.services.csv_exporter import export_results_to_csv
+from src.services.appointment_filter import apply_filters
+from src.ui.filter_panel import FilterPanel
 from src.ui.history_view import HistoryView
 from src.ui.qr_dialog import QrDialog
 from src.ui.results_table import ResultsTable
@@ -55,6 +59,7 @@ class MainWindow(QMainWindow):
         self._settings_store = settings_store
         self._whatsapp_client = WhatsAppClient(bridge_url)
         self._appointments: list[Appointment] = []
+        self._filtered_appointments: list[Appointment] = []
         self._send_worker: SendWorker | None = None
         self._results: list[SendResult] = []
         # Excel-derived state shared with the settings dialog
@@ -115,17 +120,33 @@ class MainWindow(QMainWindow):
         send_layout = QVBoxLayout(send_tab)
 
         # --- Preview table ---
+        preview_header = QHBoxLayout()
         preview_label = QLabel("Vista previa de citas:")
-        send_layout.addWidget(preview_label)
+        preview_label.setStyleSheet("font-weight: bold;")
+        preview_header.addWidget(preview_label)
+        preview_header.addStretch()
 
-        self._preview_table = QTableWidget(0, 5)
-        self._preview_table.setHorizontalHeaderLabels(
-            ["Paciente", "Teléfono", "Fecha", "Hora", "Tipo"]
-        )
+        self._select_all_cb = QCheckBox("Seleccionar todos")
+        self._select_all_cb.setChecked(True)
+        self._select_all_cb.toggled.connect(self._on_select_all_toggled)
+        preview_header.addWidget(self._select_all_cb)
+
+        self._selection_count_label = QLabel("")
+        self._selection_count_label.setStyleSheet("color: #666;")
+        preview_header.addWidget(self._selection_count_label)
+        send_layout.addLayout(preview_header)
+
+        self._preview_table = QTableWidget(0, 0)
         self._preview_table.setAlternatingRowColors(True)
         self._preview_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._preview_table.setMaximumHeight(180)
+        self._preview_table.itemChanged.connect(self._on_preview_item_changed)
         send_layout.addWidget(self._preview_table)
+
+        # --- Filter panel (Excel-like column filters) ---
+        self._filter_panel = FilterPanel()
+        self._filter_panel.filters_changed.connect(self._on_filters_changed)
+        send_layout.addWidget(self._filter_panel)
 
         # --- Send button and progress ---
         send_btn_layout = QHBoxLayout()
@@ -280,11 +301,12 @@ class MainWindow(QMainWindow):
                 try:
                     self._appointments = read_excel(
                         self._settings.last_file_path,
-                        self._settings.default_country_code,
+                        phone_header=self._settings.phone_header,
+                        default_country_code=self._settings.default_country_code,
                     )
                     self._file_label.setText(Path(self._settings.last_file_path).name)
-                    self._populate_preview(self._appointments)
-                    self._send_btn.setEnabled(len(self._appointments) > 0)
+                    self._filter_panel.set_appointments(self._appointments)
+                    self._apply_filters()
                 except ExcelReadError as exc:
                     QMessageBox.critical(self, "Error al leer Excel", str(exc))
             self._status_bar.showMessage("Configuración guardada", 3000)
@@ -306,7 +328,11 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            appointments = read_excel(file_path, self._settings.default_country_code)
+            appointments = read_excel(
+                file_path,
+                phone_header=self._settings.phone_header,
+                default_country_code=self._settings.default_country_code,
+            )
             self._appointments = appointments
             self._settings.last_file_path = file_path
             self._file_label.setText(Path(file_path).name)
@@ -317,8 +343,8 @@ class MainWindow(QMainWindow):
             except ExcelReadError:
                 self._excel_headers = []
             self._sample_raw_data = dict(appointments[0].raw_data) if appointments else {}
-            self._populate_preview(appointments)
-            self._send_btn.setEnabled(len(appointments) > 0)
+            self._filter_panel.set_appointments(appointments)
+            self._apply_filters()
             self._status_bar.showMessage(
                 f"Cargadas {len(appointments)} citas", 3000
             )
@@ -330,26 +356,107 @@ class MainWindow(QMainWindow):
             )
 
     def _populate_preview(self, appointments: list[Appointment]) -> None:
-        """Fill the preview table with appointment data."""
+        """Fill the preview table with appointment data (dynamic columns).
+
+        A leading checkbox column lets the user pick which rows to send to.
+        All rows are checked by default.
+        """
+        # Avoid the itemChanged signal firing while we rebuild the table.
+        self._preview_table.blockSignals(True)
         self._preview_table.setRowCount(0)
+        self._preview_table.setColumnCount(0)
+
+        if not appointments:
+            self._preview_table.blockSignals(False)
+            self._update_selection_count()
+            return
+
+        # Use the headers from the first appointment's raw_data as columns.
+        headers = list(appointments[0].raw_data.keys())
+        labels = ["✓"] + headers
+        self._preview_table.setColumnCount(len(labels))
+        self._preview_table.setHorizontalHeaderLabels(labels)
+
         for appt in appointments:
             row = self._preview_table.rowCount()
             self._preview_table.insertRow(row)
-            self._preview_table.setItem(row, 0, QTableWidgetItem(appt.patient_name))
-            self._preview_table.setItem(
-                row, 1, QTableWidgetItem(appt.phone_normalized or "(inválido)")
+
+            # Checkbox cell (column 0).
+            check_item = QTableWidgetItem()
+            check_item.setFlags(
+                Qt.ItemFlag.ItemIsUserCheckable
+                | Qt.ItemFlag.ItemIsEnabled
+                | Qt.ItemFlag.ItemIsSelectable
             )
-            self._preview_table.setItem(
-                row, 2, QTableWidgetItem(appt.start_time.strftime("%Y-%m-%d"))
-            )
-            self._preview_table.setItem(
-                row, 3, QTableWidgetItem(appt.start_time.strftime("%H:%M"))
-            )
-            self._preview_table.setItem(row, 4, QTableWidgetItem(appt.appointment_type))
+            check_item.setCheckState(Qt.CheckState.Checked)
+            self._preview_table.setItem(row, 0, check_item)
+
+            for col, header in enumerate(headers):
+                self._preview_table.setItem(
+                    row, col + 1, QTableWidgetItem(appt.get(header))
+                )
+
+        # Narrow the checkbox column.
+        header_view = self._preview_table.horizontalHeader()
+        if header_view is not None:
+            header_view.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self._preview_table.blockSignals(False)
+        self._update_selection_count()
+
+    def _on_preview_item_changed(self, item: QTableWidgetItem) -> None:
+        """React to a checkbox toggle in the preview table."""
+        if item.column() == 0:
+            self._update_selection_count()
+
+    def _on_select_all_toggled(self, checked: bool) -> None:
+        """Check or uncheck every visible row."""
+        self._preview_table.blockSignals(True)
+        state = Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
+        for row in range(self._preview_table.rowCount()):
+            cell = self._preview_table.item(row, 0)
+            if cell is not None:
+                cell.setCheckState(state)
+        self._preview_table.blockSignals(False)
+        self._update_selection_count()
+
+    def _update_selection_count(self) -> None:
+        """Refresh the 'X / Y seleccionados' label and send-button state."""
+        total = self._preview_table.rowCount()
+        selected = 0
+        for row in range(total):
+            cell = self._preview_table.item(row, 0)
+            if cell is not None and cell.checkState() == Qt.CheckState.Checked:
+                selected += 1
+        if total:
+            self._selection_count_label.setText(f"{selected} / {total} seleccionados")
+        else:
+            self._selection_count_label.setText("")
+        self._send_btn.setEnabled(selected > 0)
+
+    def _get_selected_appointments(self) -> list[Appointment]:
+        """Return the filtered appointments whose checkbox is checked."""
+        selected: list[Appointment] = []
+        for row in range(self._preview_table.rowCount()):
+            cell = self._preview_table.item(row, 0)
+            if cell is not None and cell.checkState() == Qt.CheckState.Checked:
+                if row < len(self._filtered_appointments):
+                    selected.append(self._filtered_appointments[row])
+        return selected
+
+    def _on_filters_changed(self) -> None:
+        """Re-apply the active filters and refresh the preview."""
+        self._apply_filters()
+
+    def _apply_filters(self) -> None:
+        """Recompute the filtered appointments and repaint the preview."""
+        conditions = self._filter_panel.conditions()
+        self._filtered_appointments = apply_filters(self._appointments, conditions)
+        self._populate_preview(self._filtered_appointments)
 
     def _on_send(self) -> None:
         """Start sending WhatsApp messages."""
-        if not self._appointments:
+        selected = self._get_selected_appointments()
+        if not selected:
             return
 
         # Check WhatsApp connection
@@ -379,7 +486,7 @@ class MainWindow(QMainWindow):
         self._results = []
         self._results_table.clear_results()
         self._send_worker = SendWorker(
-            appointments=self._appointments,
+            appointments=selected,
             template=self._settings.message_template,
             bridge_url=self._bridge_url,
         )
@@ -391,10 +498,13 @@ class MainWindow(QMainWindow):
         self._send_btn.setEnabled(False)
         self._cancel_btn.setEnabled(True)
         self._select_btn.setEnabled(False)
+        self._filter_panel.setEnabled(False)
         self._progress.setVisible(True)
         self._progress.setValue(0)
-        self._progress.setMaximum(len(self._appointments))
-        self._status_bar.showMessage("Enviando mensajes...")
+        self._progress.setMaximum(len(selected))
+        self._status_bar.showMessage(
+            f"Enviando mensajes a {len(selected)} destinatario(s)..."
+        )
 
         self._send_worker.start()
 
@@ -439,6 +549,7 @@ class MainWindow(QMainWindow):
         self._send_btn.setEnabled(True)
         self._cancel_btn.setEnabled(False)
         self._select_btn.setEnabled(True)
+        self._filter_panel.setEnabled(True)
         self._export_btn.setEnabled(len(results) > 0)
         self._progress.setVisible(False)
 
@@ -453,6 +564,7 @@ class MainWindow(QMainWindow):
         self._send_btn.setEnabled(True)
         self._cancel_btn.setEnabled(False)
         self._select_btn.setEnabled(True)
+        self._filter_panel.setEnabled(True)
         self._progress.setVisible(False)
 
     def _on_export_csv(self) -> None:
