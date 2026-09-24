@@ -2,24 +2,37 @@
  * WhatsApp Bridge — Baileys HTTP server for the desktop utility.
  *
  * Endpoints:
- *   GET  /status  — check connection state
- *   GET  /qr      — get current QR code string
- *   POST /pair    — request pairing code (phone number)
- *   POST /send    — send a text message
+ *   GET   /status      — check connection state
+ *   GET   /qr          — get current QR code string
+ *   POST  /connect     — (re)start Baileys pairing
+ *   POST  /pair        — request pairing code (phone number)
+ *   POST  /logout      — close session and clear auth state
+ *   POST  /send        — send a text message (returns accepted + message_id)
+ *   GET   /message/:id — query the real delivery status of a message
  *
- * Auth state is persisted to ./auth/ (relative to bridge/ directory).
+ * Auth state is persisted to a user-writable directory:
+ *   - $WHATSAPP_AUTH_DIR if set (passed by the Python host)
+ *   - otherwise %APPDATA%\whatsapp-notifier\bridge-auth (Windows)
+ *             or ~/.config/whatsapp-notifier/bridge-auth (POSIX)
+ * This is required because Program Files is read-only for non-admin users.
  */
 
-const express = require('express');
-const {
-    default: makeWASocket,
+import express from 'express';
+import {
+    default as makeWASocket,
     useMultiFileAuthState,
     DisconnectReason,
     fetchLatestBaileysVersion,
-} = require('@whiskeysockets/baileys');
-const { Boom } = require('@hapi/boom');
-const path = require('path');
-const fs = require('fs');
+    Browsers,
+} from '@whiskeysockets/baileys';
+import { Boom } from '@hapi/boom';
+import path from 'node:path';
+import fs from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import pino from 'pino';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 // Parse CLI args
 const args = process.argv.slice(2);
@@ -35,12 +48,11 @@ app.use(express.json({ limit: '10mb' }));
 
 // Global state
 let sock = null;
-let connectionState = 'connecting';
+let connectionState = 'close';
 let currentQR = null;
 let connectionPhone = null;
-// Whether to auto-reconnect after a connection drop. Set to false on logout
-// so the bridge stays disconnected until the user explicitly reconnects.
-let shouldReconnect = true;
+let isStarting = false;
+let shouldReconnect = false;
 
 // Receipt map: message_id -> { status, server_ack, delivery_ack, updated_at }
 // Fed by the 'messages.update' event. Volatile (in-memory only).
@@ -65,12 +77,31 @@ function toAggregateStatus(entry) {
     return 'sending';
 }
 
-const authDir = path.join(__dirname, 'auth');
+function resolveAuthDir() {
+    if (process.env.WHATSAPP_AUTH_DIR) {
+        return process.env.WHATSAPP_AUTH_DIR;
+    }
+    const appName = 'whatsapp-notifier';
+    const subdir = 'bridge-auth';
+    if (process.platform === 'win32' && process.env.APPDATA) {
+        return path.join(process.env.APPDATA, appName, subdir);
+    }
+    if (process.platform === 'darwin' && process.env.HOME) {
+        return path.join(process.env.HOME, 'Library', 'Application Support', appName, subdir);
+    }
+    const xdg = process.env.XDG_CONFIG_HOME || (process.env.HOME && path.join(process.env.HOME, '.config'));
+    if (xdg) {
+        return path.join(xdg, appName, subdir);
+    }
+    // Fallback: relative to bridge dir (dev mode only)
+    return path.join(__dirname, 'auth');
+}
+
+const authDir = resolveAuthDir();
 if (!fs.existsSync(authDir)) {
     fs.mkdirSync(authDir, { recursive: true });
 }
 
-// Clear the persisted auth state and connection state (used on logout).
 function clearAuth() {
     try {
         fs.rmSync(authDir, { recursive: true, force: true });
@@ -85,79 +116,103 @@ function clearAuth() {
     receiptMap.clear();
 }
 
+function handleConnectionUpdate(update) {
+    const { connection, lastDisconnect, qr } = update;
+
+    if (qr) {
+        currentQR = qr;
+        connectionState = 'connecting';
+        console.log('QR code generated, waiting for scan');
+    }
+
+    if (connection === 'connecting') {
+        connectionState = 'connecting';
+        console.log('Connecting to WhatsApp...');
+    }
+
+    if (connection === 'open') {
+        connectionState = 'open';
+        currentQR = null;
+        shouldReconnect = true;
+        console.log('WhatsApp connected!');
+    }
+
+    if (connection === 'close') {
+        const statusCode = new Boom(lastDisconnect?.error)?.output?.statusCode;
+        console.log(`Connection closed. Status: ${statusCode}`);
+        connectionState = 'close';
+        currentQR = null;
+
+        if (statusCode === DisconnectReason.loggedOut) {
+            console.log('Logged out. Clearing auth state.');
+            clearAuth();
+        } else if (shouldReconnect) {
+            // restartRequired (515) is a normal part of the QR pairing flow:
+            // WhatsApp asks the client to restart with the new credentials.
+            const delay = statusCode === DisconnectReason.restartRequired ? 0 : 3000;
+            console.log(`Reconnecting in ${delay}ms (status ${statusCode})...`);
+            setTimeout(() => startBaileys(), delay);
+        }
+    }
+}
+
 async function startBaileys() {
-    const { version, isLatest } = await fetchLatestBaileysVersion();
-    console.log(`Baileys version: ${version} (latest: ${isLatest})`);
-
-    const { state, saveCreds } = await useMultiFileAuthState(authDir);
-
-    sock = makeWASocket({
-        version,
-        auth: state,
-        printQRInTerminal: false,
-        logger: require('pino')({ level: 'warn' }),
-    });
-
-    sock.ev.on('creds.update', saveCreds);
-
-    // Track delivery receipts so clients can query the real status of a message.
-    sock.ev.on('messages.update', (updates) => {
-        for (const { key, status } of updates || []) {
-            if (!key || !key.id) continue;
-            const entry = ensureReceipt(key.id);
-            const statusStr = String(status || '');
-            if (statusStr === 'SERVER_ACK') entry.server_ack = true;
-            if (statusStr === 'DELIVERY_ACK' || statusStr === 'READ') {
-                entry.delivery_ack = true;
+    if (isStarting) {
+        console.log('startBaileys already in progress, skipping');
+        return;
+    }
+    isStarting = true;
+    try {
+        // Close any existing socket to avoid duplicate connections
+        if (sock) {
+            try {
+                sock.end();
+            } catch (err) {
+                console.error('Error ending previous socket:', err.message);
             }
-            if (statusStr === 'ERROR') entry.status = 'ERROR';
-            entry.updated_at = Math.floor(Date.now() / 1000);
-        }
-    });
-
-    sock.ev.on('connection.update', (update) => {
-        const { connection, lastDisconnect, qr } = update;
-
-        if (qr) {
-            currentQR = qr;
-            connectionState = 'close';
-            console.log('QR code generated, waiting for scan');
+            sock = null;
         }
 
-        if (connection === 'connecting') {
-            connectionState = 'connecting';
-            console.log('Connecting to WhatsApp...');
-        }
+        const { version, isLatest } = await fetchLatestBaileysVersion();
+        console.log(`Baileys version: ${version} (latest: ${isLatest})`);
 
-        if (connection === 'open') {
-            connectionState = 'open';
-            currentQR = null;
-            console.log('WhatsApp connected!');
-        }
+        const { state, saveCreds } = await useMultiFileAuthState(authDir);
 
-        if (connection === 'close') {
-            const statusCode = new Boom(lastDisconnect?.error)?.output?.statusCode;
-            console.log(`Connection closed. Status: ${statusCode}`);
+        sock = makeWASocket({
+            version,
+            auth: state,
+            browser: Browsers.ubuntu('Chrome'),
+            printQRInTerminal: false,
+            markOnlineOnConnect: false,
+            qrTimeout: 120000,
+            syncFullHistory: false,
+            logger: pino({ level: 'warn' }),
+        });
 
-            if (statusCode === DisconnectReason.loggedOut) {
-                // Session was logged out — clear auth state
-                console.log('Logged out. Clearing auth state.');
-                clearAuth();
-                if (shouldReconnect) {
-                    startBaileys();
+        sock.ev.on('creds.update', saveCreds);
+
+        // Track delivery receipts so clients can query the real status of a message.
+        sock.ev.on('messages.update', (updates) => {
+            for (const { key, status } of updates || []) {
+                if (!key || !key.id) continue;
+                const entry = ensureReceipt(key.id);
+                const statusStr = String(status || '');
+                if (statusStr === 'SERVER_ACK') entry.server_ack = true;
+                if (statusStr === 'DELIVERY_ACK' || statusStr === 'READ') {
+                    entry.delivery_ack = true;
                 }
-            } else {
-                connectionState = 'close';
-                if (shouldReconnect) {
-                    // Reconnect
-                    console.log('Reconnecting...');
-                    startBaileys();
-                } else {
-                    console.log('Disconnected — waiting for explicit reconnect');
-                }
+                if (statusStr === 'ERROR') entry.status = 'ERROR';
+                entry.updated_at = Math.floor(Date.now() / 1000);
             }
-        }
-    });
+        });
+
+        sock.ev.on('connection.update', handleConnectionUpdate);
+    } catch (err) {
+        console.error('Failed to start Baileys:', err);
+        connectionState = 'close';
+    } finally {
+        isStarting = false;
+    }
 }
 
 // --- Endpoints ---
@@ -185,30 +240,7 @@ app.get('/qr', (req, res) => {
     });
 });
 
-// POST /pair — request pairing code (alternative to QR)
-app.post('/pair', async (req, res) => {
-    const { phone } = req.body;
-    if (!phone) {
-        return res.status(400).json({ error: 'Phone number is required' });
-    }
-    if (connectionState === 'open') {
-        return res.status(409).json({ error: 'Already connected' });
-    }
-    try {
-        // Request pairing code
-        const pairingCode = await sock.requestPairingCode(phone.replace('+', ''));
-        connectionPhone = phone;
-        res.json({
-            pairing_code: pairingCode,
-            expires_in: 90,
-        });
-    } catch (err) {
-        console.error('Pairing error:', err.message);
-        res.status(500).json({ error: 'Failed to request pairing code' });
-    }
-});
-
-// POST /connect — (re)start Baileys pairing (used from the Settings dialog)
+// POST /connect — explicitly start Baileys and begin pairing
 app.post('/connect', (req, res) => {
     if (connectionState === 'open') {
         return res.status(409).json({ error: 'Already connected' });
@@ -225,7 +257,32 @@ app.post('/connect', (req, res) => {
     res.json({ success: true, state: 'connecting' });
 });
 
-// POST /logout — close the session and clear auth so a new number can be linked
+// POST /pair — request pairing code (alternative to QR)
+app.post('/pair', async (req, res) => {
+    const { phone } = req.body;
+    if (!phone) {
+        return res.status(400).json({ error: 'Phone number is required' });
+    }
+    if (connectionState === 'open') {
+        return res.status(409).json({ error: 'Already connected' });
+    }
+    try {
+        if (!sock) {
+            return res.status(503).json({ error: 'WhatsApp socket not ready. Try again in a few seconds.' });
+        }
+        const pairingCode = await sock.requestPairingCode(phone.replace(/\+/g, '').replace(/\s/g, ''));
+        connectionPhone = phone;
+        res.json({
+            pairing_code: pairingCode,
+            expires_in: 90,
+        });
+    } catch (err) {
+        console.error('Pairing error:', err.message, err.stack);
+        res.status(500).json({ error: err.message || 'Failed to request pairing code' });
+    }
+});
+
+// POST /logout — disconnect and clear auth state so a new number can be linked
 app.post('/logout', (req, res) => {
     shouldReconnect = false;
     if (sock) {
@@ -241,7 +298,7 @@ app.post('/logout', (req, res) => {
     res.json({ success: true, message: 'Logged out, ready for new pairing' });
 });
 
-// POST /send — send a text message
+// POST /send — accept a text message for sending (returns accepted + message_id)
 app.post('/send', async (req, res) => {
     const { number, text } = req.body;
 
@@ -264,6 +321,7 @@ app.post('/send', async (req, res) => {
 
         res.json({
             accepted: true,
+            success: true, // deprecated alias kept for older clients
             message_id: messageId,
             status: 'sending',
             timestamp: sent.messageTimestamp || Math.floor(Date.now() / 1000),
@@ -296,10 +354,7 @@ app.get('/message/:id', (req, res) => {
 // Start server
 app.listen(port, '127.0.0.1', () => {
     console.log(`WhatsApp bridge listening on http://127.0.0.1:${port}`);
-    startBaileys().catch((err) => {
-        console.error('Failed to start Baileys:', err);
-        connectionState = 'close';
-    });
+    // Do NOT auto-start Baileys. Wait for an explicit POST /connect request.
 });
 
 // Graceful shutdown

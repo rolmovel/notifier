@@ -11,11 +11,13 @@ from src.services.send_queue import SendJob, SendQueue
 def _make_job(row: int = 1) -> SendJob:
     appointment = Appointment(
         row_number=row,
-        start_time=datetime(2026, 7, 15, 10, 30),
-        duration_minutes=30,
-        patient_name=f"Paciente {row}",
-        appointment_type="Limpieza",
-        phone_mobile="612345678",
+        raw_data={
+            "nombre del paciente": f"Paciente {row}",
+            "hora de inicio": "2026-07-15 10:30",
+            "tipo de cita": "Limpieza",
+            "teléfono móvil": "612345678",
+        },
+        phone_header="teléfono móvil",
         country_code="+34",
     )
     return SendJob(appointment=appointment, rendered_text=f"Hola {row}")

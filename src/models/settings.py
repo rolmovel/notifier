@@ -5,9 +5,9 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 
 
-DEFAULT_MESSAGE_TEMPLATE = """Hola {{patient_name}},
+DEFAULT_MESSAGE_TEMPLATE = """Hola {{Paciente}},
 
-Le recordamos su cita el {{appointment_date}} a las {{appointment_time}} para {{appointment_type}}.
+Le recordamos su cita el {{Fecha y hora}} para {{Tipo de cita}}.
 
 Por favor, responda 'CONFIRMAR' para ratificar su asistencia o póngase en contacto si necesita reprogramar.
 
@@ -21,3 +21,6 @@ class Settings(BaseModel):
     default_country_code: str = Field(default="+34")
     message_template: str = Field(default=DEFAULT_MESSAGE_TEMPLATE)
     last_file_path: str | None = Field(default=None)
+    # Name of the Excel header (as it appears in the file) that holds the
+    # destination phone number. Configured by the user in Settings.
+    phone_header: str = Field(default="")

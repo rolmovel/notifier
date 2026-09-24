@@ -12,22 +12,13 @@ from PyInstaller.building.build_main import Analysis
 
 block_cipher = None
 
-
-def _data_dir(source_name):
-    """Return a PyInstaller data tuple only when the directory exists."""
-    if os.path.isdir(source_name):
-        return [(source_name, source_name)]
-    return []
-
 a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
     datas=[
-        # Include optional bundled directories only when present.
-        *_data_dir('bridge'),
-        *_data_dir('config'),
-        *_data_dir('assets'),
+        # Include the bridge directory (JS source + package.json)
+        ('bridge', 'bridge'),
     ],
     hiddenimports=[
         'src',

@@ -14,11 +14,13 @@ from src.services.whatsapp_client import WhatsAppClient, backoff_with_jitter
 def _make_appointment() -> Appointment:
     return Appointment(
         row_number=1,
-        start_time=datetime(2026, 7, 15, 10, 30),
-        duration_minutes=30,
-        patient_name="Juan García",
-        appointment_type="Limpieza",
-        phone_mobile="612345678",
+        raw_data={
+            "nombre del paciente": "Juan García",
+            "hora de inicio": "2026-07-15 10:30",
+            "tipo de cita": "Limpieza",
+            "teléfono móvil": "612345678",
+        },
+        phone_header="teléfono móvil",
         country_code="+34",
     )
 

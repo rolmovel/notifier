@@ -25,6 +25,23 @@ logger = logging.getLogger(__name__)
 _MAX_WORKER_RETRIES = 3
 _RETRY_BACKOFF_BASE_S = 5.0
 
+# Candidate headers (case-insensitive) that usually hold the patient name,
+# used only for log messages (the worker is schema-agnostic otherwise).
+_NAME_HEADER_HINTS = ("nombre", "paciente", "patiente", "name", "patient")
+
+
+def _patient_label(appointment) -> str:
+    """Best-effort patient label for logs (falls back to the row number)."""
+    if appointment is not None:
+        raw = getattr(appointment, "raw_data", None) or {}
+        lower = {k.strip().lower(): v for k, v in raw.items() if k and k.strip()}
+        for hint in _NAME_HEADER_HINTS:
+            for key, value in lower.items():
+                if hint in key and value:
+                    return str(value)
+        return f"fila {appointment.row_number}"
+    return "(sin cita)"
+
 
 class SendWorker(QThread):
     """QThread worker that sends WhatsApp messages for a list of appointments.
@@ -116,7 +133,11 @@ class SendWorker(QThread):
             """Called by the DeliveryTracker when a receipt resolves."""
             for i, existing in enumerate(results):
                 same_msg = (updated.message_id and existing.message_id == updated.message_id)
-                same_row = existing.appointment.row_number == updated.appointment.row_number
+                same_row = (
+                    existing.appointment is not None
+                    and updated.appointment is not None
+                    and existing.appointment.row_number == updated.appointment.row_number
+                )
                 if same_msg or same_row:
                     results[i] = updated
                     break
@@ -223,7 +244,7 @@ class SendWorker(QThread):
                     job.appointment,
                 )
             except Exception as exc:
-                logger.error("Send worker error for %s: %s", job.appointment.patient_name, exc)
+                logger.error("Send worker error for %s: %s", _patient_label(job.appointment), exc)
                 self.error.emit(str(exc))
                 return SendResult(
                     appointment=job.appointment,
@@ -253,7 +274,7 @@ class SendWorker(QThread):
                     backoff = _RETRY_BACKOFF_BASE_S * (2 ** (attempt - 1))
                     logger.warning(
                         "Worker retry %d/%d for %s in %.1fs",
-                        attempt, _MAX_WORKER_RETRIES, job.appointment.patient_name, backoff,
+                        attempt, _MAX_WORKER_RETRIES, _patient_label(job.appointment), backoff,
                     )
                     await breaker.wait_if_blocked()
                     if not breaker.allow_send():

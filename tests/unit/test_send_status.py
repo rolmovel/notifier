@@ -15,13 +15,13 @@ from src.models.send_result import SendResult, SendStatus
 def _make_appointment(row: int = 1) -> Appointment:
     return Appointment(
         row_number=row,
-        start_time=datetime(2026, 7, 15, 10, 30),
-        duration_minutes=30,
-        gabinete="Sala 3",
-        patient_name="Juan García",
-        appointment_type="Limpieza",
-        phone_landline="912345678",
-        phone_mobile="612345678",
+        raw_data={
+            "nombre del paciente": "Juan García",
+            "hora de inicio": "2026-07-15 10:30",
+            "tipo de cita": "Limpieza",
+            "teléfono móvil": "612345678",
+        },
+        phone_header="teléfono móvil",
         country_code="+34",
     )
 
