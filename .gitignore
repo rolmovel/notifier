@@ -40,6 +40,10 @@ venv/
 .mypy_cache/
 .ruff_cache/
 
+# Local test-dependency bootstrap (only when pip is unavailable, see tests/.devdeps)
+tests/.devdeps/
+tests/.pip-tmp/
+
 # Node.js bridge
 bridge/node_modules/
 bridge/auth/

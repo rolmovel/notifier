@@ -110,7 +110,9 @@ class HistoryView(QWidget):
             label = (
                 f"{started_str} | {source_name} | "
                 f"Total: {session['total_appointments']} | "
-                f"✅ {session['sent_count']} | ❌ {session['failed_count']}"
+                f"✅ {session['sent_count']} | "
+                f"⏳ {session.get('pending_count', 0)} | "
+                f"❌ {session['failed_count']}"
             )
 
             item = QListWidgetItem(label)
@@ -150,7 +152,9 @@ class HistoryView(QWidget):
         started_str = session.started_at.strftime("%Y-%m-%d %H:%M")
         self._details_label.setText(
             f"Detalles de la sesión del {started_str} — "
-            f"{session.sent_count} enviados, {session.failed_count} fallidos"
+            f"{session.delivered_count} entregados, "
+            f"{session.pending_count} pendientes, "
+            f"{session.failed_count} fallidos"
         )
         self._details_label.setVisible(True)
 

@@ -101,6 +101,10 @@ class MainWindow(QMainWindow):
         self._settings_btn.clicked.connect(self._on_open_settings)
         toolbar.addWidget(self._settings_btn)
 
+        self._connect_btn = QPushButton("📱 Conectar WhatsApp")
+        self._connect_btn.clicked.connect(self._on_connect_whatsapp)
+        toolbar.addWidget(self._connect_btn)
+
         layout.addLayout(toolbar)
 
         # --- Tab widget ---
@@ -141,6 +145,11 @@ class MainWindow(QMainWindow):
         self._export_btn.clicked.connect(self._on_export_csv)
         self._export_btn.setEnabled(False)
         send_btn_layout.addWidget(self._export_btn)
+
+        self._retry_btn = QPushButton("🔁 Reintentar pendientes")
+        self._retry_btn.clicked.connect(self._on_retry_pending)
+        self._retry_btn.setEnabled(False)
+        send_btn_layout.addWidget(self._retry_btn)
 
         send_layout.addLayout(send_btn_layout)
 
@@ -189,6 +198,38 @@ class MainWindow(QMainWindow):
         dialog = SettingsDialog(self._settings, self._settings_store, self)
         if dialog.exec() == SettingsDialog.DialogCode.Accepted:
             self._status_bar.showMessage("Configuración guardada", 3000)
+
+    def _on_connect_whatsapp(self) -> None:
+        """Open the QR/pairing dialog to link WhatsApp to the bridge."""
+        import httpx
+        try:
+            resp = httpx.get(f"{self._bridge_url}/status", timeout=5.0)
+            status = resp.json()
+            state = status.get("state", "close")
+        except Exception as exc:
+            QMessageBox.critical(
+                self, "Error de conexión",
+                f"No se pudo conectar con el bridge:\n{exc}",
+            )
+            return
+
+        if state == "open":
+            QMessageBox.information(
+                self, "WhatsApp conectado",
+                "Ya tienes WhatsApp conectado.",
+            )
+            return
+        if state == "connecting":
+            QMessageBox.information(
+                self, "Conectando...",
+                "WhatsApp se está conectando. Espera unos segundos e inténtalo de nuevo.",
+            )
+            return
+
+        dialog = QrDialog(bridge_url=self._bridge_url, parent=self)
+        if dialog.exec() == QrDialog.DialogCode.Accepted:
+            self._status_bar.showMessage("WhatsApp conectado", 3000)
+            self._update_status_bar()
 
     def _on_select_file(self) -> None:
         """Open file dialog to select an Excel file."""
@@ -270,27 +311,7 @@ class MainWindow(QMainWindow):
             return
 
         # Start the send worker
-        self._results = []
-        self._results_table.clear_results()
-        self._send_worker = SendWorker(
-            appointments=self._appointments,
-            template=self._settings.message_template,
-            bridge_url=self._bridge_url,
-        )
-        self._send_worker.progress.connect(self._on_progress)
-        self._send_worker.result_ready.connect(self._on_result_ready)
-        self._send_worker.finished_signal.connect(self._on_send_finished)
-        self._send_worker.error.connect(self._on_send_error)
-
-        self._send_btn.setEnabled(False)
-        self._cancel_btn.setEnabled(True)
-        self._select_btn.setEnabled(False)
-        self._progress.setVisible(True)
-        self._progress.setValue(0)
-        self._progress.setMaximum(len(self._appointments))
-        self._status_bar.showMessage("Enviando mensajes...")
-
-        self._send_worker.start()
+        self._start_send_worker(self._appointments)
 
     def _on_cancel_send(self) -> None:
         """Cancel the ongoing send operation."""
@@ -303,16 +324,33 @@ class MainWindow(QMainWindow):
         self._progress.setValue(current)
 
     def _on_result_ready(self, result: SendResult) -> None:
-        """Add a result to the table in real-time."""
-        self._results.append(result)
+        """Add or update a result in the table and the results list."""
+        # Upsert into the results list (dedup by row_number / message_id)
+        for i, existing in enumerate(self._results):
+            same_row = (
+                existing.appointment is not None
+                and result.appointment is not None
+                and existing.appointment.row_number == result.appointment.row_number
+            )
+            same_msg = (
+                result.message_id is not None
+                and existing.message_id == result.message_id
+            )
+            if same_row or same_msg:
+                self._results[i] = result
+                break
+        else:
+            self._results.append(result)
         self._results_table.add_result(result)
 
     def _on_send_finished(self, results: list[SendResult]) -> None:
         """Handle send completion."""
         from datetime import datetime
         from src.models.send_history import SendSession
+        from src.models.send_result import SendStatus
 
-        sent = sum(1 for r in results if r.status == SendStatus.SENT)
+        delivered = sum(1 for r in results if r.status == SendStatus.DELIVERED)
+        pending = sum(1 for r in results if r.status in (SendStatus.PENDING, SendStatus.SENDING))
         failed = sum(1 for r in results if r.status == SendStatus.FAILED)
 
         # Save to history
@@ -334,10 +372,11 @@ class MainWindow(QMainWindow):
         self._cancel_btn.setEnabled(False)
         self._select_btn.setEnabled(True)
         self._export_btn.setEnabled(len(results) > 0)
+        self._retry_btn.setEnabled(self._collect_resendable() > 0)
         self._progress.setVisible(False)
 
         self._status_bar.showMessage(
-            f"Completado: {sent} enviados, {failed} fallidos", 5000
+            f"Completado: {delivered} entregados, {pending} pendientes, {failed} fallidos", 5000
         )
         self._update_status_bar()
 
@@ -369,6 +408,76 @@ class MainWindow(QMainWindow):
             self._status_bar.showMessage(f"Exportado a {Path(file_path).name}", 3000)
         except Exception as exc:
             QMessageBox.critical(self, "Error al exportar", str(exc))
+
+    def _collect_resendable(self) -> int:
+        """Number of pending/failed results that can be re-sent."""
+        from src.models.send_result import SendStatus
+        count = sum(
+            1 for r in self._results
+            if r.status in (SendStatus.PENDING, SendStatus.FAILED)
+        )
+        return count
+
+    def _on_retry_pending(self) -> None:
+        """Re-send only the messages that are pending or failed."""
+        from src.models.send_result import SendStatus
+
+        # Deduplicate by appointment row; skip results without appointment data
+        seen: dict[int, SendResult] = {}
+        for r in self._results:
+            if r.status in (SendStatus.PENDING, SendStatus.FAILED) and r.appointment is not None:
+                if r.appointment.row_number not in seen:
+                    seen[r.appointment.row_number] = r
+        resendable = list(seen.values())
+
+        if not resendable:
+            return
+
+        # Safety net: only pending/failed (never delivered) are re-queued
+        appointments = [
+            r.appointment for r in resendable
+            if r.status != SendStatus.DELIVERED and r.appointment is not None
+        ]
+        if not appointments:
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "Reintentar pendientes",
+            f"Se reenviarán {len(appointments)} mensajes pendientes o fallidos. ¿Continuar?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        self._retry_btn.setEnabled(False)
+        self._start_send_worker(appointments)
+
+    def _start_send_worker(self, appointments: list) -> None:
+        """Start a SendWorker for the given appointments (shared send path)."""
+        from src.models.send_history import SendSession
+
+        self._results = []
+        self._results_table.clear_results()
+        self._send_worker = SendWorker(
+            appointments=appointments,
+            template=self._settings.message_template,
+            bridge_url=self._bridge_url,
+        )
+        self._send_worker.progress.connect(self._on_progress)
+        self._send_worker.result_ready.connect(self._on_result_ready)
+        self._send_worker.finished_signal.connect(self._on_send_finished)
+        self._send_worker.error.connect(self._on_send_error)
+
+        self._send_btn.setEnabled(False)
+        self._cancel_btn.setEnabled(True)
+        self._select_btn.setEnabled(False)
+        self._progress.setVisible(True)
+        self._progress.setValue(0)
+        self._progress.setMaximum(len(appointments))
+        self._status_bar.showMessage("Enviando mensajes...")
+
+        self._send_worker.start()
 
     def closeEvent(self, event) -> None:
         """Clean up on window close."""

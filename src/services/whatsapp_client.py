@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 from datetime import datetime
 from typing import Any
 
@@ -16,14 +17,25 @@ logger = logging.getLogger(__name__)
 # HTTP status codes that should trigger retries
 _RETRYABLE_STATUS_CODES = {429, 502, 503, 504}
 
-# Exponential backoff delays in seconds (5s, 10s, 20s)
-_BACKOFF_DELAYS = [5, 10, 20]
+# Exponential backoff base (ms) with jitter
+_BACKOFF_BASE_MS = 5000.0
 
-# Maximum number of retry attempts
+# Maximum number of retry attempts for transient errors
 _MAX_RETRIES = 3
 
-# Default delay between sends in seconds (1200ms)
-SEND_DELAY_SECONDS = 1.2
+# Default delay between sends in seconds (1500ms)
+SEND_DELAY_SECONDS = 1.5
+
+
+def backoff_with_jitter(attempt: int, base_ms: float = _BACKOFF_BASE_MS, cap_ms: float = 60_000.0) -> float:
+    """Exponential backoff with full jitter.
+
+    delay = random.uniform(0, min(base * 2**attempt, cap))
+
+    Full-jitter avoids synchronized retry bursts across messages.
+    """
+    exp = min(base_ms * (2 ** max(0, attempt)), cap_ms)
+    return random.uniform(0.0, exp) / 1000.0
 
 
 class WhatsAppClient:
@@ -110,7 +122,11 @@ class WhatsAppClient:
         text: str,
         appointment=None,
     ) -> SendResult:
-        """Send a WhatsApp message with retry logic.
+        """Send a WhatsApp message with bounded retry logic.
+
+        NOTE: HTTP 200 from the bridge means the message was ACCEPTED (queued),
+        not delivered. The caller must confirm delivery via `get_message_status`
+        (see DeliveryTracker). The returned SendResult has status SENDING.
 
         Args:
             number: Destination phone number in E.164 format.
@@ -118,11 +134,12 @@ class WhatsAppClient:
             appointment: Optional Appointment object for the SendResult.
 
         Returns:
-            SendResult with the outcome (sent or failed).
+            SendResult with the outcome (sending/delivered/failed).
         """
         client = await self._get_client()
 
         last_error: str = ""
+        attempt_number = 1
 
         for attempt in range(_MAX_RETRIES + 1):
             try:
@@ -130,11 +147,13 @@ class WhatsAppClient:
 
                 if response.status_code == 200:
                     data = response.json()
+                    message_id = data.get("message_id")
                     return SendResult(
                         appointment=appointment,
-                        status=SendStatus.SENT,
+                        status=SendStatus.SENDING,
                         phone_used=number,
                         message_sent=text,
+                        message_id=message_id,
                         sent_at=datetime.now(),
                         api_response=data,
                     )
@@ -157,16 +176,18 @@ class WhatsAppClient:
                         phone_used=number,
                         message_sent=text,
                         error_reason=error_msg,
+                        retryable=False,
                         api_response=error_data,
                     )
 
                 # Retryable errors
                 if response.status_code in _RETRYABLE_STATUS_CODES:
                     last_error = f"HTTP {response.status_code}"
+                    attempt_number += 1
                     if attempt < _MAX_RETRIES:
-                        delay = _BACKOFF_DELAYS[attempt]
+                        delay = backoff_with_jitter(attempt)
                         logger.warning(
-                            "Send to %s failed (attempt %d/%d): %s. Retrying in %ds...",
+                            "Send to %s failed (attempt %d/%d): %s. Retrying in %.1fs...",
                             number, attempt + 1, _MAX_RETRIES + 1, last_error, delay,
                         )
                         await asyncio.sleep(delay)
@@ -175,15 +196,17 @@ class WhatsAppClient:
 
                 # Other HTTP errors
                 last_error = f"HTTP {response.status_code}: {response.text}"
+                attempt_number += 1
                 break
 
             except (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout,
                     httpx.PoolTimeout) as exc:
                 last_error = f"Error de conexión: {exc}"
+                attempt_number += 1
                 if attempt < _MAX_RETRIES:
-                    delay = _BACKOFF_DELAYS[attempt]
+                    delay = backoff_with_jitter(attempt)
                     logger.warning(
-                        "Send to %s failed (attempt %d/%d): %s. Retrying in %ds...",
+                        "Send to %s failed (attempt %d/%d): %s. Retrying in %.1fs...",
                         number, attempt + 1, _MAX_RETRIES + 1, last_error, delay,
                     )
                     await asyncio.sleep(delay)
@@ -191,6 +214,7 @@ class WhatsAppClient:
                 break
             except httpx.HTTPError as exc:
                 last_error = f"Error HTTP: {exc}"
+                attempt_number += 1
                 break
 
         return SendResult(
@@ -199,4 +223,47 @@ class WhatsAppClient:
             phone_used=number,
             message_sent=text,
             error_reason=f"Máximo de reintentos excedido: {last_error}",
+            retryable=True,
         )
+
+    async def get_message_status(self, message_id: str) -> dict[str, Any]:
+        """Query the real delivery status of a previously sent message.
+
+        Args:
+            message_id: The message id returned by POST /send.
+
+        Returns:
+            Dict with keys: status (SendStatus), server_ack, delivery_ack,
+            updated_at, and raw response. On bridge/network error the status is
+            PENDING (unknown → treat as not confirmed yet).
+        """
+        client = await self._get_client()
+        try:
+            response = await client.get(f"/message/{message_id}")
+            if response.status_code == 200:
+                data = response.json()
+                raw_status = data.get("status", "sending")
+                mapping = {
+                    "delivered": SendStatus.DELIVERED,
+                    "pending": SendStatus.PENDING,
+                    "sending": SendStatus.SENDING,
+                    "failed": SendStatus.FAILED,
+                }
+                return {
+                    "status": mapping.get(raw_status, SendStatus.PENDING),
+                    "server_ack": bool(data.get("server_ack", False)),
+                    "delivery_ack": bool(data.get("delivery_ack", False)),
+                    "updated_at": data.get("updated_at"),
+                    "raw": data,
+                }
+            if response.status_code == 404:
+                logger.info("Message %s not yet tracked by bridge", message_id)
+                return {"status": SendStatus.PENDING, "server_ack": False,
+                        "delivery_ack": False, "updated_at": None, "raw": {}}
+            logger.warning("Status check for %s returned HTTP %d", message_id, response.status_code)
+            return {"status": SendStatus.PENDING, "server_ack": False,
+                    "delivery_ack": False, "updated_at": None, "raw": {}}
+        except httpx.HTTPError as exc:
+            logger.error("Failed to get message status %s: %s", message_id, exc)
+            return {"status": SendStatus.PENDING, "server_ack": False,
+                    "delivery_ack": False, "updated_at": None, "raw": {}}

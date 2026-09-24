@@ -7,7 +7,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
-from src.models.send_result import SendResult
+from src.models.send_result import SendResult, SendStatus
 
 
 class SendSession(BaseModel):
@@ -22,16 +22,22 @@ class SendSession(BaseModel):
     results: list[SendResult] = Field(default_factory=list)
 
     @property
-    def sent_count(self) -> int:
-        """Number of successfully sent messages."""
-        return sum(1 for r in self.results if r.status.value == "sent")
+    def delivered_count(self) -> int:
+        """Number of messages with confirmed delivery."""
+        return sum(1 for r in self.results if r.status == SendStatus.DELIVERED)
+
+    @property
+    def pending_count(self) -> int:
+        """Number of messages still pending delivery (or in-flight)."""
+        return sum(1 for r in self.results if r.status in (SendStatus.PENDING, SendStatus.SENDING))
 
     @property
     def failed_count(self) -> int:
         """Number of failed messages."""
-        return sum(1 for r in self.results if r.status.value == "failed")
+        return sum(1 for r in self.results if r.status == SendStatus.FAILED)
 
+    # Backward-compat alias: previously "sent" meant accepted; keep for UI/history.
     @property
-    def pending_count(self) -> int:
-        """Number of appointments not yet processed."""
-        return self.total_appointments - len(self.results)
+    def sent_count(self) -> int:
+        """Number of successfully sent messages (alias of delivered_count)."""
+        return self.delivered_count

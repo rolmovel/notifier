@@ -38,10 +38,51 @@ let sock = null;
 let connectionState = 'connecting';
 let currentQR = null;
 let connectionPhone = null;
+// Whether to auto-reconnect after a connection drop. Set to false on logout
+// so the bridge stays disconnected until the user explicitly reconnects.
+let shouldReconnect = true;
+
+// Receipt map: message_id -> { status, server_ack, delivery_ack, updated_at }
+// Fed by the 'messages.update' event. Volatile (in-memory only).
+const receiptMap = new Map();
+
+function ensureReceipt(messageId) {
+    if (!receiptMap.has(messageId)) {
+        receiptMap.set(messageId, {
+            status: 'sending',
+            server_ack: false,
+            delivery_ack: false,
+            updated_at: Math.floor(Date.now() / 1000),
+        });
+    }
+    return receiptMap.get(messageId);
+}
+
+function toAggregateStatus(entry) {
+    if (entry.delivery_ack) return 'delivered';
+    if (entry.server_ack) return 'pending';
+    if (entry.status === 'ERROR') return 'failed';
+    return 'sending';
+}
 
 const authDir = path.join(__dirname, 'auth');
 if (!fs.existsSync(authDir)) {
     fs.mkdirSync(authDir, { recursive: true });
+}
+
+// Clear the persisted auth state and connection state (used on logout).
+function clearAuth() {
+    try {
+        fs.rmSync(authDir, { recursive: true, force: true });
+        fs.mkdirSync(authDir, { recursive: true });
+    } catch (err) {
+        console.error('Failed to clear auth:', err.message);
+    }
+    connectionState = 'close';
+    currentQR = null;
+    connectionPhone = null;
+    shouldReconnect = false;
+    receiptMap.clear();
 }
 
 async function startBaileys() {
@@ -58,6 +99,21 @@ async function startBaileys() {
     });
 
     sock.ev.on('creds.update', saveCreds);
+
+    // Track delivery receipts so clients can query the real status of a message.
+    sock.ev.on('messages.update', (updates) => {
+        for (const { key, status } of updates || []) {
+            if (!key || !key.id) continue;
+            const entry = ensureReceipt(key.id);
+            const statusStr = String(status || '');
+            if (statusStr === 'SERVER_ACK') entry.server_ack = true;
+            if (statusStr === 'DELIVERY_ACK' || statusStr === 'READ') {
+                entry.delivery_ack = true;
+            }
+            if (statusStr === 'ERROR') entry.status = 'ERROR';
+            entry.updated_at = Math.floor(Date.now() / 1000);
+        }
+    });
 
     sock.ev.on('connection.update', (update) => {
         const { connection, lastDisconnect, qr } = update;
@@ -86,15 +142,19 @@ async function startBaileys() {
             if (statusCode === DisconnectReason.loggedOut) {
                 // Session was logged out — clear auth state
                 console.log('Logged out. Clearing auth state.');
-                fs.rmSync(authDir, { recursive: true, force: true });
-                fs.mkdirSync(authDir, { recursive: true });
-                connectionState = 'close';
-                startBaileys();
+                clearAuth();
+                if (shouldReconnect) {
+                    startBaileys();
+                }
             } else {
                 connectionState = 'close';
-                // Reconnect
-                console.log('Reconnecting...');
-                startBaileys();
+                if (shouldReconnect) {
+                    // Reconnect
+                    console.log('Reconnecting...');
+                    startBaileys();
+                } else {
+                    console.log('Disconnected — waiting for explicit reconnect');
+                }
             }
         }
     });
@@ -148,6 +208,39 @@ app.post('/pair', async (req, res) => {
     }
 });
 
+// POST /connect — (re)start Baileys pairing (used from the Settings dialog)
+app.post('/connect', (req, res) => {
+    if (connectionState === 'open') {
+        return res.status(409).json({ error: 'Already connected' });
+    }
+    if (connectionState === 'connecting') {
+        return res.json({ success: true, state: 'connecting' });
+    }
+    connectionState = 'connecting';
+    shouldReconnect = true;
+    startBaileys().catch((err) => {
+        console.error('Failed to start Baileys:', err);
+        connectionState = 'close';
+    });
+    res.json({ success: true, state: 'connecting' });
+});
+
+// POST /logout — close the session and clear auth so a new number can be linked
+app.post('/logout', (req, res) => {
+    shouldReconnect = false;
+    if (sock) {
+        try {
+            sock.end();
+        } catch (err) {
+            console.error('Error ending socket:', err.message);
+        }
+        sock = null;
+    }
+    clearAuth();
+    console.log('Logged out, auth state cleared. Ready for new pairing.');
+    res.json({ success: true, message: 'Logged out, ready for new pairing' });
+});
+
 // POST /send — send a text message
 app.post('/send', async (req, res) => {
     const { number, text } = req.body;
@@ -166,15 +259,38 @@ app.post('/send', async (req, res) => {
 
         const sent = await sock.sendMessage(jid, { text: text });
 
+        const messageId = sent.key.id;
+        ensureReceipt(messageId);
+
         res.json({
-            success: true,
-            message_id: sent.key.id,
+            accepted: true,
+            message_id: messageId,
+            status: 'sending',
             timestamp: sent.messageTimestamp || Math.floor(Date.now() / 1000),
         });
     } catch (err) {
         console.error('Send error:', err.message);
         res.status(500).json({ error: err.message || 'Failed to send message' });
     }
+});
+
+// GET /message/:id — query the real delivery status of a sent message
+app.get('/message/:id', (req, res) => {
+    const messageId = req.params.id;
+    if (connectionState !== 'open') {
+        return res.status(409).json({ error: 'Not connected to WhatsApp' });
+    }
+    const entry = receiptMap.get(messageId);
+    if (!entry) {
+        return res.status(404).json({ error: 'Unknown message id' });
+    }
+    res.json({
+        message_id: messageId,
+        status: toAggregateStatus(entry),
+        server_ack: entry.server_ack,
+        delivery_ack: entry.delivery_ack,
+        updated_at: entry.updated_at,
+    });
 });
 
 // Start server
