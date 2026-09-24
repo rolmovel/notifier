@@ -19,6 +19,7 @@ class SendStatus(str, Enum):
     SENDING = "sending"
     DELIVERED = "delivered"
     PENDING = "pending"
+    ACCEPTED_NO_RECEIPT = "accepted_without_receipt"
     FAILED = "failed"
 
     @classmethod

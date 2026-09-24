@@ -21,6 +21,7 @@ _STATUS_TEXT = {
     SendStatus.DELIVERED: "delivered",
     SendStatus.SENDING: "pending",
     SendStatus.PENDING: "pending",
+    SendStatus.ACCEPTED_NO_RECEIPT: "accepted_without_receipt",
     SendStatus.FAILED: "failed",
 }
 

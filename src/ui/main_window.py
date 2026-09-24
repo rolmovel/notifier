@@ -107,10 +107,6 @@ class MainWindow(QMainWindow):
         self._settings_btn.clicked.connect(self._on_open_settings)
         toolbar.addWidget(self._settings_btn)
 
-        self._connect_btn = QPushButton("📱 Conectar WhatsApp")
-        self._connect_btn.clicked.connect(self._on_connect_whatsapp)
-        toolbar.addWidget(self._connect_btn)
-
         layout.addLayout(toolbar)
 
         # --- Tab widget ---
@@ -173,6 +169,15 @@ class MainWindow(QMainWindow):
         self._retry_btn.setEnabled(False)
         send_btn_layout.addWidget(self._retry_btn)
 
+        self._confirm_btn = QPushButton("✅ Confirmar entregado (manual)")
+        self._confirm_btn.clicked.connect(self._on_confirm_selected)
+        self._confirm_btn.setEnabled(False)
+        self._confirm_btn.setToolTip(
+            "Marca como entregados los mensajes 'Aceptado sin acuse' seleccionados.\n"
+            "Úsalo solo si WhatsApp muestra el mensaje como entregado."
+        )
+        send_btn_layout.addWidget(self._confirm_btn)
+
         send_layout.addLayout(send_btn_layout)
 
         # --- Progress bar ---
@@ -227,10 +232,6 @@ class MainWindow(QMainWindow):
         dialog._tabs.setCurrentIndex(1)
         dialog.exec()
         self._update_status_bar()
-
-    def _on_connect_whatsapp(self) -> None:
-        """Toolbar button — open the QR/pairing dialog directly."""
-        self._do_connect()
 
     def _do_disconnect(self) -> None:
         """Disconnect WhatsApp in a background thread."""
@@ -530,6 +531,13 @@ class MainWindow(QMainWindow):
             appointments=appointments,
             template=self._settings.message_template,
             bridge_url=self._bridge_url,
+            send_interval_ms=self._settings.send_interval_ms,
+            delivery_timeout_s=self._settings.delivery_timeout_s,
+            poll_interval_s=self._settings.poll_interval_s,
+            max_retries=self._settings.max_retries,
+            retry_backoff_base_s=self._settings.retry_backoff_base_s,
+            circuit_threshold=self._settings.circuit_threshold,
+            circuit_cooldown_s=self._settings.circuit_cooldown_s,
         )
         self._send_worker.progress.connect(self._on_progress)
         self._send_worker.result_ready.connect(self._on_result_ready)
@@ -586,6 +594,7 @@ class MainWindow(QMainWindow):
 
         delivered = sum(1 for r in results if r.status == SendStatus.DELIVERED)
         pending = sum(1 for r in results if r.status in (SendStatus.PENDING, SendStatus.SENDING))
+        no_receipt = sum(1 for r in results if r.status == SendStatus.ACCEPTED_NO_RECEIPT)
         failed = sum(1 for r in results if r.status == SendStatus.FAILED)
 
         # Save to history
@@ -609,10 +618,12 @@ class MainWindow(QMainWindow):
         self._filter_panel.setEnabled(True)
         self._export_btn.setEnabled(len(results) > 0)
         self._retry_btn.setEnabled(self._collect_resendable() > 0)
+        self._confirm_btn.setEnabled(self._collect_confirmable() > 0)
         self._progress.setVisible(False)
 
         self._status_bar.showMessage(
-            f"Completado: {delivered} entregados, {pending} pendientes, {failed} fallidos", 5000
+            f"Completado: {delivered} entregados, {pending} pendientes, "
+            f"{no_receipt} aceptados sin acuse, {failed} fallidos", 8000
         )
         self._update_status_bar()
 
@@ -669,6 +680,58 @@ class MainWindow(QMainWindow):
         self._retry_btn.setEnabled(False)
         self._start_send_worker(appointments)
 
+    def _collect_confirmable(self) -> int:
+        """Number of results accepted without a receipt (manually confirmable)."""
+        return sum(
+            1 for r in self._results
+            if r.status == SendStatus.ACCEPTED_NO_RECEIPT
+        )
+
+    def _on_confirm_selected(self) -> None:
+        """Manually mark selected accepted-without-receipt rows as delivered."""
+        selected = [
+            r for r in self._results_table.selected_results()
+            if r.status == SendStatus.ACCEPTED_NO_RECEIPT
+        ]
+        if not selected:
+            QMessageBox.information(
+                self,
+                "Confirmar entrega",
+                "Selecciona en la tabla uno o varios mensajes con estado "
+                "'Aceptado sin acuse' para confirmarlos como entregados.",
+            )
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "Confirmar entrega manual",
+            f"Se marcarán {len(selected)} mensaje(s) como ENTREGADOS.\n\n"
+            "Confírmalo solo si WhatsApp muestra el mensaje como entregado.\n"
+            "Esta acción no reenvía nada.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        from datetime import datetime
+        confirmed = 0
+        for result in selected:
+            updated = result.model_copy(
+                update={
+                    "status": SendStatus.DELIVERED,
+                    "delivered_at": datetime.now(),
+                    "error_reason": "Confirmado manualmente por el usuario",
+                }
+            )
+            self._on_result_ready(updated)
+            confirmed += 1
+
+        self._confirm_btn.setEnabled(self._collect_confirmable() > 0)
+        self._status_bar.showMessage(
+            f"{confirmed} mensaje(s) confirmados manualmente como entregados", 5000
+        )
+
     def _on_export_csv(self) -> None:
         """Export results to a CSV file."""
         if not self._results:
@@ -697,6 +760,15 @@ class MainWindow(QMainWindow):
 
         if self._send_worker and self._send_worker.isRunning():
             self._send_worker.cancel()
-            self._send_worker.wait(5000)
+            if not self._send_worker.wait(5000):
+                # Never destroy a running QThread: keep the window open and
+                # let the user close it again once cancellation has completed.
+                event.ignore()
+                self._status_bar.showMessage(
+                    "Cancelando el seguimiento de entregas; vuelve a cerrar en unos segundos...",
+                    5000,
+                )
+                self._status_timer.start(30000)
+                return
 
         super().closeEvent(event)

@@ -112,6 +112,7 @@ class HistoryView(QWidget):
                 f"Total: {session['total_appointments']} | "
                 f"✅ {session['sent_count']} | "
                 f"⏳ {session.get('pending_count', 0)} | "
+                f"⚠️ {session.get('accepted_without_receipt_count', 0)} | "
                 f"❌ {session['failed_count']}"
             )
 
@@ -154,6 +155,7 @@ class HistoryView(QWidget):
             f"Detalles de la sesión del {started_str} — "
             f"{session.delivered_count} entregados, "
             f"{session.pending_count} pendientes, "
+            f"{session.accepted_without_receipt_count} sin acuse, "
             f"{session.failed_count} fallidos"
         )
         self._details_label.setVisible(True)

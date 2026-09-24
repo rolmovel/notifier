@@ -32,6 +32,11 @@ class SendSession(BaseModel):
         return sum(1 for r in self.results if r.status in (SendStatus.PENDING, SendStatus.SENDING))
 
     @property
+    def accepted_without_receipt_count(self) -> int:
+        """Number of accepted messages without a verifiable delivery receipt."""
+        return sum(1 for r in self.results if r.status == SendStatus.ACCEPTED_NO_RECEIPT)
+
+    @property
     def failed_count(self) -> int:
         """Number of failed messages."""
         return sum(1 for r in self.results if r.status == SendStatus.FAILED)

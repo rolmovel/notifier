@@ -77,6 +77,17 @@ function toAggregateStatus(entry) {
     return 'sending';
 }
 
+// Numeric values of proto.WebMessageInfo.Status as emitted by Baileys 6.x
+// in the 'messages.update' event (NOT strings).
+const MSG_STATUS = {
+    ERROR: 0,
+    PENDING: 1,
+    SERVER_ACK: 2,
+    DELIVERY_ACK: 3,
+    READ: 4,
+    PLAYED: 5,
+};
+
 function resolveAuthDir() {
     if (process.env.WHATSAPP_AUTH_DIR) {
         return process.env.WHATSAPP_AUTH_DIR;
@@ -100,6 +111,25 @@ function resolveAuthDir() {
 const authDir = resolveAuthDir();
 if (!fs.existsSync(authDir)) {
     fs.mkdirSync(authDir, { recursive: true });
+}
+
+// Temporary, payload-free diagnostics for the delivery investigation.
+// One JSON object per line; never logs message text.
+const diagnosticLogPath = path.join(authDir, 'receipt-diagnostics.jsonl');
+function diagnosticLog(event, data = {}) {
+    try {
+        fs.appendFileSync(
+            diagnosticLogPath,
+            JSON.stringify({
+                timestamp: new Date().toISOString(),
+                event,
+                ...data,
+            }) + '\\n',
+            'utf8',
+        );
+    } catch (err) {
+        console.error('Diagnostic log failed:', err.message);
+    }
 }
 
 function clearAuth() {
@@ -193,16 +223,64 @@ async function startBaileys() {
 
         // Track delivery receipts so clients can query the real status of a message.
         sock.ev.on('messages.update', (updates) => {
-            for (const { key, status } of updates || []) {
+            diagnosticLog('messages.update.batch', {
+                count: Array.isArray(updates) ? updates.length : 0,
+                items: (updates || []).map(({ key, update, status }) => ({
+                    id: key?.id || null,
+                    remoteJid: key?.remoteJid || null,
+                    fromMe: key?.fromMe ?? null,
+                    updateKeys: update ? Object.keys(update) : [],
+                    statusRaw: update?.status ?? status ?? null,
+                    statusType: typeof (update?.status ?? status),
+                })),
+            });
+            for (const { key, update, status } of updates || []) {
                 if (!key || !key.id) continue;
                 const entry = ensureReceipt(key.id);
-                const statusStr = String(status || '');
-                if (statusStr === 'SERVER_ACK') entry.server_ack = true;
-                if (statusStr === 'DELIVERY_ACK' || statusStr === 'READ') {
+                // Baileys 6.x emits WAMessageUpdate as { key, update: { status } }.
+                // Keep the top-level fallback for compatibility with older versions.
+                const s = Number(update?.status ?? status);
+                if (s === MSG_STATUS.SERVER_ACK) entry.server_ack = true;
+                if (s === MSG_STATUS.DELIVERY_ACK
+                    || s === MSG_STATUS.READ
+                    || s === MSG_STATUS.PLAYED) {
                     entry.delivery_ack = true;
                 }
-                if (statusStr === 'ERROR') entry.status = 'ERROR';
+                if (s === MSG_STATUS.ERROR) entry.status = 'ERROR';
                 entry.updated_at = Math.floor(Date.now() / 1000);
+                diagnosticLog('messages.update.item', {
+                    id: key.id,
+                    statusRaw: update?.status ?? status ?? null,
+                    statusNumber: s,
+                    aggregate: toAggregateStatus(entry),
+                    serverAck: entry.server_ack,
+                    deliveryAck: entry.delivery_ack,
+                });
+            }
+        });
+
+        // Some Baileys flows expose delivery/read acknowledgements through
+        // message-receipt.update instead of messages.update.
+        sock.ev.on('message-receipt.update', (updates) => {
+            diagnosticLog('message-receipt.update.batch', {
+                count: Array.isArray(updates) ? updates.length : 0,
+                items: (updates || []).map(({ key, receipt }) => ({
+                    id: key?.id || null,
+                    remoteJid: key?.remoteJid || null,
+                    fromMe: key?.fromMe ?? null,
+                    receiptKeys: receipt ? Object.keys(receipt) : [],
+                    hasReceiptTimestamp: Boolean(receipt?.receiptTimestamp),
+                    hasReadTimestamp: Boolean(receipt?.readTimestamp),
+                    hasPlayedTimestamp: Boolean(receipt?.playedTimestamp),
+                })),
+            });
+            for (const { key, receipt } of updates || []) {
+                if (!key || !key.id) continue;
+                const entry = ensureReceipt(key.id);
+                if (receipt?.receiptTimestamp || receipt?.readTimestamp || receipt?.playedTimestamp) {
+                    entry.delivery_ack = true;
+                    entry.updated_at = Math.floor(Date.now() / 1000);
+                }
             }
         });
 
@@ -318,6 +396,12 @@ app.post('/send', async (req, res) => {
 
         const messageId = sent.key.id;
         ensureReceipt(messageId);
+        diagnosticLog('send.accepted', {
+            messageId,
+            remoteJid: sent.key.remoteJid || null,
+            fromMe: sent.key.fromMe ?? null,
+            timestamp: sent.messageTimestamp || Math.floor(Date.now() / 1000),
+        });
 
         res.json({
             accepted: true,
@@ -342,13 +426,15 @@ app.get('/message/:id', (req, res) => {
     if (!entry) {
         return res.status(404).json({ error: 'Unknown message id' });
     }
-    res.json({
+    const response = {
         message_id: messageId,
         status: toAggregateStatus(entry),
         server_ack: entry.server_ack,
         delivery_ack: entry.delivery_ack,
         updated_at: entry.updated_at,
-    });
+    };
+    diagnosticLog('message.status.response', response);
+    res.json(response);
 });
 
 // Start server

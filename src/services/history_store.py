@@ -83,6 +83,7 @@ class HistoryStore:
                     "valid_appointments": session.valid_appointments,
                     "sent_count": session.delivered_count,
                     "pending_count": session.pending_count,
+                    "accepted_without_receipt_count": session.accepted_without_receipt_count,
                     "failed_count": session.failed_count,
                     "file_path": str(file_path),
                 })

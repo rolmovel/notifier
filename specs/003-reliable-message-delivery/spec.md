@@ -91,7 +91,9 @@ Para cada mensaje debe quedar constancia de lo que ocurrió en cada intento (hor
 
 ### Functional Requirements
 
-- **FR-001**: El sistema DEBE distinguir al menos tres estados de un mensaje: **entregado**, **pendiente** y **fallido**. El estado "enviado" a secas NO es aceptable si no hay confirmación real de entrega.
+- **FR-001**: El sistema DEBE distinguir al menos cuatro estados de un mensaje: **entregado**, **pendiente**, **aceptado sin acuse** y **fallido**. El estado "enviado" a secas NO es aceptable si no hay confirmación real de entrega.
+- **FR-001A**: Cuando WhatsApp acepta el mensaje pero Baileys no proporciona un acuse verificable dentro del timeout, el sistema DEBE usar `accepted_without_receipt`, no `delivered`, y DEBE permitir confirmación manual explícita.
+- **FR-001B**: Un mensaje `accepted_without_receipt` NO DEBE reintentarse automáticamente, porque el reintento puede duplicar un mensaje ya entregado.
 - **FR-002**: El sistema NO DEBE marcar un mensaje como entregado basándose únicamente en que el bridge devolvió HTTP 200 tras encolarlo. La confirmación DEBE basarse en una señal de entrega del servidor de WhatsApp.
 - **FR-003**: El bridge DEBE exponer un mecanismo para consultar el estado real de un mensaje a partir de su `message_id` (entrega / pendiente / fallido), y DEBE propagar los acuses de Baileys (`messages.update` con `status`) en lugar de responder `success: true` incondicionalmente.
 - **FR-004**: El cliente DEBE esperar la confirmación de entrega con un tiempo límite configurable; si se agota, el mensaje se clasifica como pendiente o fallido por timeout, nunca como entregado.

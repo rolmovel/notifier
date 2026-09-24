@@ -278,6 +278,14 @@ class WhatsAppClient:
             if response.status_code == 200:
                 data = response.json()
                 raw_status = data.get("status", "sending")
+                logger.info(
+                    "Delivery status %s: raw=%s server_ack=%s delivery_ack=%s updated_at=%s",
+                    message_id,
+                    raw_status,
+                    data.get("server_ack"),
+                    data.get("delivery_ack"),
+                    data.get("updated_at"),
+                )
                 mapping = {
                     "delivered": SendStatus.DELIVERED,
                     "pending": SendStatus.PENDING,

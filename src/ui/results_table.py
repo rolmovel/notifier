@@ -1,4 +1,4 @@
-"""Results table widget — displays send results in a QTableWidget.
+﻿"""Results table widget — displays send results in a QTableWidget.
 
 The data columns are taken dynamically from the Excel headers stored in each
 appointment's ``raw_data``. Two fixed columns are appended: the send status
@@ -33,6 +33,7 @@ class ResultsTable(QTableWidget):
         SendStatus.DELIVERED: ("✅ Entregado", Qt.GlobalColor.darkGreen),
         SendStatus.SENDING: ("⏳ Pendiente", Qt.GlobalColor.darkYellow),
         SendStatus.PENDING: ("⏳ Pendiente", Qt.GlobalColor.darkYellow),
+        SendStatus.ACCEPTED_NO_RECEIPT: ("⚠️ Aceptado sin acuse", Qt.GlobalColor.darkYellow),
         SendStatus.FAILED: ("❌ Fallido", Qt.GlobalColor.red),
     }
 
@@ -41,6 +42,7 @@ class ResultsTable(QTableWidget):
         self._data_headers: list[str] = []
         self._setup_ui()
         self._row_keys: dict[tuple, int] = {}  # key -> row index
+        self._row_results: dict[int, SendResult] = {}
 
     def _setup_ui(self) -> None:
         """Initialize the table UI."""
@@ -79,6 +81,7 @@ class ResultsTable(QTableWidget):
         """Remove all rows from the table."""
         self.setRowCount(0)
         self._row_keys.clear()
+        self._row_results.clear()
 
     def add_result(self, result: SendResult) -> None:
         """Add or update a row for the result (upsert by key)."""
@@ -95,6 +98,7 @@ class ResultsTable(QTableWidget):
             row = self.rowCount()
             self.insertRow(row)
             self._row_keys[key] = row
+        self._row_results[row] = result
 
         label, color = self.STATUS_DISPLAY.get(
             result.status, ("❓ Desconocido", Qt.GlobalColor.gray)
@@ -128,6 +132,7 @@ class ResultsTable(QTableWidget):
         """Return a summary of current results."""
         delivered = 0
         pending = 0
+        accepted_without_receipt = 0
         failed = 0
         status_col = self.status_column
         for row in range(self.rowCount()):
@@ -141,11 +146,14 @@ class ResultsTable(QTableWidget):
                 delivered += 1
             elif "Pendiente" in text:
                 pending += 1
+            elif "Aceptado sin acuse" in text:
+                accepted_without_receipt += 1
             else:
                 failed += 1
         return {
             "delivered": delivered,
             "pending": pending,
+            "accepted_without_receipt": accepted_without_receipt,
             "failed": failed,
             "total": self.rowCount(),
         }
@@ -160,3 +168,10 @@ class ResultsTable(QTableWidget):
                 continue
             seen[r.appointment.row_number] = r
         return list(seen.values())
+
+    def selected_results(self) -> list[SendResult]:
+        """Return results for the currently selected table rows."""
+        rows = sorted({index.row() for index in self.selectionModel().selectedRows()})
+        return [self._row_results[row] for row in rows if row in self._row_results]
+
+

@@ -21,9 +21,7 @@ from src.services.whatsapp_client import SEND_DELAY_SECONDS, WhatsAppClient
 
 logger = logging.getLogger(__name__)
 
-# Retry policy for messages that come back failed with transient errors
-_MAX_WORKER_RETRIES = 3
-_RETRY_BACKOFF_BASE_S = 5.0
+# Retry policy defaults are supplied by Settings via SendWorker.
 
 # Candidate headers (case-insensitive) that usually hold the patient name,
 # used only for log messages (the worker is schema-agnostic otherwise).
@@ -70,8 +68,11 @@ class SendWorker(QThread):
         bridge_url: str = "http://127.0.0.1:3001",
         send_interval_ms: int = int(SEND_DELAY_SECONDS * 1000),
         delivery_timeout_s: float = 45.0,
+        poll_interval_s: float = 2.0,
+        max_retries: int = 3,
+        retry_backoff_base_s: float = 5.0,
         circuit_threshold: int = 3,
-        circuit_cooldown_s: int = 60,
+        circuit_cooldown_s: float = 60,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -80,13 +81,27 @@ class SendWorker(QThread):
         self._bridge_url = bridge_url
         self._send_interval_ms = send_interval_ms
         self._delivery_timeout_s = delivery_timeout_s
+        self._poll_interval_s = poll_interval_s
+        self._max_retries = max_retries
+        self._retry_backoff_base_s = retry_backoff_base_s
         self._circuit_threshold = circuit_threshold
         self._circuit_cooldown_s = circuit_cooldown_s
         self._cancelled = False
+        self._track_tasks: list = []  # DeliveryTracker tasks to await before closing the loop
+        self._loop: asyncio.AbstractEventLoop | None = None
 
     def cancel(self) -> None:
-        """Request cancellation of the send loop."""
+        """Request cancellation of the send loop and receipt trackers."""
         self._cancelled = True
+        loop = self._loop
+        if loop is not None and loop.is_running():
+            loop.call_soon_threadsafe(self._cancel_tracking_tasks)
+
+    def _cancel_tracking_tasks(self) -> None:
+        """Cancel tracker tasks from inside their owning event loop."""
+        for task in self._track_tasks:
+            if not task.done():
+                task.cancel()
 
     @property
     def is_cancelled(self) -> bool:
@@ -96,11 +111,19 @@ class SendWorker(QThread):
         """Execute the send loop in a background thread."""
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
+        self._loop = loop
         results: list[SendResult] = []
 
         client = WhatsAppClient(self._bridge_url)
         try:
             loop.run_until_complete(self._dispatch(loop, client, results))
+            # Wait for every delivery tracker so receipts can resolve before we
+            # close the loop (otherwise the tracking tasks would be cancelled
+            # and messages would stay "pending" forever).
+            if self._track_tasks:
+                loop.run_until_complete(
+                    asyncio.gather(*self._track_tasks, return_exceptions=True)
+                )
         except Exception as exc:
             logger.error("Send worker error: %s", exc)
             self.error.emit(str(exc))
@@ -110,6 +133,7 @@ class SendWorker(QThread):
             except Exception:
                 pass
             loop.close()
+            self._loop = None
 
         self.finished_signal.emit(results)
 
@@ -125,7 +149,7 @@ class SendWorker(QThread):
             cooldown_s=self._circuit_cooldown_s,
         )
         limiter = RateLimiter(min_interval_ms=self._send_interval_ms)
-        tracker = DeliveryTracker(client, timeout_s=self._delivery_timeout_s)
+        tracker = DeliveryTracker(client, poll_interval_s=self._poll_interval_s, timeout_s=self._delivery_timeout_s)
         total = len(self._appointments)
         processed = 0
 
@@ -167,7 +191,7 @@ class SendWorker(QThread):
             message_text = render_template(self._template, appointment)
             queue.enqueue(
                 SendJob(appointment=appointment, rendered_text=message_text),
-                max_total_s=self._delivery_timeout_s * (_MAX_WORKER_RETRIES + 1),
+                max_total_s=self._delivery_timeout_s * (self._max_retries + 1),
             )
 
         # --- Dispatch loop: one message at a time, rate-limited ---
@@ -229,7 +253,7 @@ class SendWorker(QThread):
         DeliveryTracker for background confirmation.
         """
         attempt = 0
-        while attempt <= _MAX_WORKER_RETRIES and not self._cancelled:
+        while attempt <= self._max_retries and not self._cancelled:
             attempt += 1
             job.attempts.append(SendAttempt(
                 attempt_number=attempt,
@@ -260,7 +284,9 @@ class SendWorker(QThread):
                 job.message_id = result.message_id
                 job.attempts[-1].message_id = result.message_id
                 breaker.record_success()
-                tracker.start_track(result, on_tracked)
+                task = tracker.start_track(result, on_tracked)
+                self._track_tasks.append(task)
+                logger.info("Delivery tracker task created for %s (tasks=%d)", result.message_id, len(self._track_tasks))
                 return result
 
             if result.status == SendStatus.FAILED:
@@ -270,11 +296,11 @@ class SendWorker(QThread):
                     return result
                 # Transient failure — retry with backoff (bounded)
                 breaker.record_error(is_retryable=True)
-                if attempt <= _MAX_WORKER_RETRIES:
-                    backoff = _RETRY_BACKOFF_BASE_S * (2 ** (attempt - 1))
+                if attempt <= self._max_retries:
+                    backoff = self._retry_backoff_base_s * (2 ** (attempt - 1))
                     logger.warning(
                         "Worker retry %d/%d for %s in %.1fs",
-                        attempt, _MAX_WORKER_RETRIES, _patient_label(job.appointment), backoff,
+                        attempt, self._max_retries, _patient_label(job.appointment), backoff,
                     )
                     await breaker.wait_if_blocked()
                     if not breaker.allow_send():
@@ -284,7 +310,9 @@ class SendWorker(QThread):
 
             # Unexpected status (e.g. PENDING directly) — treat as in-flight
             breaker.record_success()
-            tracker.start_track(result, on_tracked)
+            task = tracker.start_track(result, on_tracked)
+            self._track_tasks.append(task)
+            logger.info("Delivery tracker task created for %s (tasks=%d)", result.message_id, len(self._track_tasks))
             return result
 
         return None

@@ -1,4 +1,4 @@
-"""Settings model for the WhatsApp Desktop Utility."""
+﻿"""Settings model for the WhatsApp Desktop Utility."""
 
 from __future__ import annotations
 
@@ -24,3 +24,12 @@ class Settings(BaseModel):
     # Name of the Excel header (as it appears in the file) that holds the
     # destination phone number. Configured by the user in Settings.
     phone_header: str = Field(default="")
+    send_interval_ms: int = Field(default=1500, ge=0, le=300000)
+    delivery_timeout_s: float = Field(default=45.0, gt=0, le=3600)
+    poll_interval_s: float = Field(default=2.0, gt=0, le=300)
+    max_retries: int = Field(default=3, ge=0, le=20)
+    retry_backoff_base_s: float = Field(default=5.0, ge=0, le=3600)
+    circuit_threshold: int = Field(default=3, ge=1, le=100)
+    circuit_cooldown_s: float = Field(default=60.0, gt=0, le=3600)
+
+

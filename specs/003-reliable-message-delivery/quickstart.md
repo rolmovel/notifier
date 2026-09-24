@@ -42,18 +42,29 @@ curl http://127.0.0.1:3001/message/3EB0...
 
 > `accepted: true` ya NO significa "entregado". El estado real es el que devuelve `GET /message/{id}`.
 
+## Confirmación manual de entrega
+
+Si un mensaje queda como **"⚠️ Aceptado sin acuse"** es porque WhatsApp lo aceptó pero Baileys no devolvió un acuse verificable (sucede con frecuencia aunque el mensaje se entregue). En ese caso:
+
+1. Comprueba en el teléfono receptor el estado del mensaje.
+2. Si WhatsApp muestra el mensaje como entregado, selecciona la(s) fila(s) en la tabla.
+3. Pulsa **"✅ Confirmar entregado (manual)"**.
+
+La confirmación manual **no reenvía** el mensaje y se registra en el historial. Los mensajes "accepted_without_receipt" **no** se reintentan automáticamente para evitar duplicados.
+
 ## Parámetros de robustez (Settings)
 
-Todos configurables; valores por defecto conservadores:
+Todos configurables en **⚙ Configuración → 🔗 Conexión → Envío seguro y anti-saturación**; valores por defecto conservadores:
 
 | Parámetro | Default | Qué controla |
 |-----------|---------|--------------|
-| Intervalo entre envíos | 1500 ms | espaciado mínimo entre mensajes |
-| Máx. reintentos | 3 | reintentos por mensaje |
-| Base de backoff | 5000 ms | espera inicial de reintento (crece exponencialmente) |
-| Plazo de entrega | 45 s | tiempo para recibir el acuse antes de marcarlo pendiente/fallido |
-| Umbral del circuit breaker | 3 errores | errores seguidos antes de pausar todo |
-| Enfriamiento | 60 s | pausa global tras abrir el circuito |
+| Intervalo entre mensajes | 1500 ms | espaciado mínimo entre envíos (anti-saturación) |
+| Máx. reintentos | 3 | reintentos por mensaje en fallos transitorios |
+| Backoff inicial | 5 s | espera inicial de reintento (crece exponencialmente) |
+| Timeout de confirmación | 45 s | tiempo esperando el acuse antes de marcar "aceptado sin acuse" |
+| Intervalo de consulta | 2 s | frecuencia con la que el tracker consulta el estado |
+| Errores para pausar | 3 | errores seguidos antes de abrir el circuit breaker |
+| Tiempo de pausa global | 60 s | enfriamiento tras abrir el circuito |
 
 ## Prueba de regresión rápida
 

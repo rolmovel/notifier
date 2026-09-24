@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QFileDialog,
+    QDoubleSpinBox,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -265,6 +266,49 @@ class SettingsDialog(QDialog):
         form.addRow("Puerto del bridge:", self._port_input)
 
         conn_tab_layout.addWidget(general_group)
+
+        # --- Safe sending parameters ---
+        safe_group = QGroupBox("Envío seguro y anti-saturación")
+        safe_form = QFormLayout(safe_group)
+
+        self._send_interval_input = QSpinBox()
+        self._send_interval_input.setRange(0, 300000)
+        self._send_interval_input.setSuffix(" ms")
+        safe_form.addRow("Intervalo entre mensajes:", self._send_interval_input)
+
+        self._delivery_timeout_input = QDoubleSpinBox()
+        self._delivery_timeout_input.setRange(1.0, 3600.0)
+        self._delivery_timeout_input.setDecimals(1)
+        self._delivery_timeout_input.setSuffix(" s")
+        safe_form.addRow("Timeout de confirmación:", self._delivery_timeout_input)
+
+        self._poll_interval_input = QDoubleSpinBox()
+        self._poll_interval_input.setRange(0.5, 300.0)
+        self._poll_interval_input.setDecimals(1)
+        self._poll_interval_input.setSuffix(" s")
+        safe_form.addRow("Intervalo de consulta:", self._poll_interval_input)
+
+        self._max_retries_input = QSpinBox()
+        self._max_retries_input.setRange(0, 20)
+        safe_form.addRow("Máximo de reintentos:", self._max_retries_input)
+
+        self._backoff_input = QDoubleSpinBox()
+        self._backoff_input.setRange(0.0, 3600.0)
+        self._backoff_input.setDecimals(1)
+        self._backoff_input.setSuffix(" s")
+        safe_form.addRow("Backoff inicial:", self._backoff_input)
+
+        self._circuit_threshold_input = QSpinBox()
+        self._circuit_threshold_input.setRange(1, 100)
+        safe_form.addRow("Errores para pausar:", self._circuit_threshold_input)
+
+        self._circuit_cooldown_input = QDoubleSpinBox()
+        self._circuit_cooldown_input.setRange(1.0, 3600.0)
+        self._circuit_cooldown_input.setDecimals(1)
+        self._circuit_cooldown_input.setSuffix(" s")
+        safe_form.addRow("Tiempo de pausa global:", self._circuit_cooldown_input)
+
+        conn_tab_layout.addWidget(safe_group)
         conn_tab_layout.addStretch()
 
         self._tabs.addTab(conn_tab, "🔗 Conexión")
@@ -288,6 +332,13 @@ class SettingsDialog(QDialog):
         self._template_edit.setPlainText(self._settings.message_template)
         self._country_code_input.setText(self._settings.default_country_code)
         self._port_input.setValue(self._settings.bridge_port)
+        self._send_interval_input.setValue(self._settings.send_interval_ms)
+        self._delivery_timeout_input.setValue(self._settings.delivery_timeout_s)
+        self._poll_interval_input.setValue(self._settings.poll_interval_s)
+        self._max_retries_input.setValue(self._settings.max_retries)
+        self._backoff_input.setValue(self._settings.retry_backoff_base_s)
+        self._circuit_threshold_input.setValue(self._settings.circuit_threshold)
+        self._circuit_cooldown_input.setValue(self._settings.circuit_cooldown_s)
         self._refresh_phone_header_combo()
 
     def _refresh_connection_status(self) -> None:
@@ -586,6 +637,13 @@ class SettingsDialog(QDialog):
         self._settings.message_template = self._template_edit.toPlainText()
         self._settings.default_country_code = self._country_code_input.text().strip() or "+34"
         self._settings.bridge_port = self._port_input.value()
+        self._settings.send_interval_ms = self._send_interval_input.value()
+        self._settings.delivery_timeout_s = self._delivery_timeout_input.value()
+        self._settings.poll_interval_s = self._poll_interval_input.value()
+        self._settings.max_retries = self._max_retries_input.value()
+        self._settings.retry_backoff_base_s = self._backoff_input.value()
+        self._settings.circuit_threshold = self._circuit_threshold_input.value()
+        self._settings.circuit_cooldown_s = self._circuit_cooldown_input.value()
 
         if self._store:
             try:

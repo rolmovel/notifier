@@ -62,6 +62,13 @@ class DeliveryTracker:
         while True:
             info = await self._client.get_message_status(result.message_id)
             status = info.get("status", SendStatus.PENDING)
+            logger.info(
+                "Tracker poll %s: status=%s server_ack=%s delivery_ack=%s",
+                result.message_id,
+                status,
+                info.get("server_ack"),
+                info.get("delivery_ack"),
+            )
 
             if status == SendStatus.DELIVERED:
                 logger.info("Message %s delivered", result.message_id)
@@ -83,13 +90,13 @@ class DeliveryTracker:
 
             if time.monotonic() >= deadline:
                 logger.warning(
-                    "Message %s still not confirmed after %.0fs — marking pending",
+                    "Message %s accepted but no receipt after %.0fs — marking accepted_without_receipt",
                     result.message_id, self._timeout_s,
                 )
                 return result.model_copy(
                     update={
-                        "status": SendStatus.PENDING,
-                        "error_reason": f"Sin confirmación de entrega en {int(self._timeout_s)}s",
+                        "status": SendStatus.ACCEPTED_NO_RECEIPT,
+                        "error_reason": f"Aceptado por WhatsApp, sin acuse de entrega en {int(self._timeout_s)}s",
                     }
                 )
 
@@ -99,7 +106,7 @@ class DeliveryTracker:
         self,
         result: SendResult,
         on_done: Callable[[SendResult], Awaitable[None] | None],
-    ) -> None:
+    ):
         """Kick off background tracking on the currently running event loop.
 
         Must be called from inside a running asyncio loop (the worker thread).
@@ -107,9 +114,14 @@ class DeliveryTracker:
         Args:
             result: The in-flight SendResult to track.
             on_done: Callback invoked with the resolved SendResult.
+
+        Returns:
+            The asyncio.Task created, so the caller can await it before
+            closing the loop (otherwise the tracking would be cancelled).
         """
         loop = asyncio.get_running_loop()
-        loop.create_task(self._run_track(result, on_done))
+        task = loop.create_task(self._run_track(result, on_done))
+        return task
 
     async def _run_track(
         self,

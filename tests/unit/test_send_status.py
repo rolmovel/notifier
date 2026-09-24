@@ -37,6 +37,10 @@ class TestSendStatusEnum:
         assert SendStatus("sent") == SendStatus.DELIVERED
         assert SendStatus("sent").value == "delivered"
 
+    def test_accepted_without_receipt_value(self) -> None:
+        assert SendStatus.ACCEPTED_NO_RECEIPT.value == "accepted_without_receipt"
+        assert SendStatus.ACCEPTED_NO_RECEIPT != SendStatus.DELIVERED
+
 
 class TestSendResultModel:
     def test_send_result_with_new_fields(self) -> None:
